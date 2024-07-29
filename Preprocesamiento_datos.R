@@ -16,7 +16,6 @@ library(lubridate)
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
 data = fread(file.path(directory, "ChanludM_min5.csv"))
-data = data[-1,]
 
 # Función para pre procesamiento de datos 
 data_preprocess = function(df, variable){
