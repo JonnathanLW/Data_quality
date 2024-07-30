@@ -1,7 +1,7 @@
 ################################################################################
 # Readme -----------------------------------------------------------------------
 ######### Reportes de la versión 
-# Versión: 3.0.0
+# Versión: 2.0.0
 # Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad)
 # Se plantea la opción de utilizar paralelización para hacer el procedimiento mas rápido (Testear funcionalidad).
 # * Nota: Proceso de paralelizar resulta poco eficiente (Testear funcionalidad)
@@ -16,8 +16,7 @@ library(lubridate)
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
 data = fread(file.path(directory, "JimaM_min5.csv"))
-df = data
-variable = "Lluvia_Tot"
+
 ################################################################################
 # Funciones implementadas ------------------------------------------------------
 # Función para los limites duros de la base de datos
@@ -83,13 +82,12 @@ limites.duros = function(df, variable) {
     df.comparar = merge(df.comparar, est.near3, by = "TIMESTAMP", all = TRUE)
     names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1", "est.near2", "est.near3")
     
-    
-    # Método de Desviación Estándar sin ponderación --------------------------------
+    # Método de Desviación Estándar sin ponderación ----------------------------
     Resultados = df.comparar
     for (i in 1:nrow(df.comparar)) {
       precipitations = as.matrix(df.comparar[i, c("Est.objetivo", "est.near1", "est.near2", "est.near3")])
-      mean_values = mean(precipitations[,-1])
-      std_dev_values = sd(precipitations[,-1])
+      mean_values = mean(precipitations[,-1], na.rm = TRUE)
+      std_dev_values = sd(precipitations[,-1], na.rm = TRUE)
       v_outlier = precipitations[,1]
       C_final = (v_outlier - mean_values) / std_dev_values
       valid = ifelse(abs(C_final) > 2, "Si", "No")
@@ -101,14 +99,13 @@ limites.duros = function(df, variable) {
     # Elijo si desean eliminar los valores por encima del limite superior
     msn = dlg_message("¿Desea eliminar los valores por encima del límite superior?", type = c("yesno"))$res
     
-    if (msn == "Yes") {
+    if (msn == "yes") {
       df[ind.Ls, variable] = NA
     } 
 
   } else {
     dlg_message("No se encontraron valores por encima del límite superior.")
   }
-  
   return(df)
 }
 
@@ -119,6 +116,7 @@ data_preprocess = function(df, variable){
   df = df[, c("TIMESTAMP", variable)]
   df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
   df[[variable]] = as.numeric(df[[variable]])
+  df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
   df = df[order(df$TIMESTAMP),]
   
   # Identificación y eliminación de duplicados ---------------------------------
@@ -284,6 +282,5 @@ data_preprocess = function(df, variable){
 
 # Ejecución de la función ------------------------------------------------------
 df = limites.duros(data, "Lluvia_Tot")
-
-df = data_preprocess(data, "Lluvia_Tot")
+df = data_preprocess(df, "Lluvia_Tot")
 
