@@ -15,7 +15,102 @@ library(lubridate)
 ################################################################################
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
-data = fread(file.path(directory, "ChanludM_min5.csv"))
+data = fread(file.path(directory, "JimaM_min5.csv"))
+df = data
+variable = "Lluvia_Tot"
+################################################################################
+# Funciones implementadas ------------------------------------------------------
+# Función para los limites duros de la base de datos
+limites.duros = function(df, variable) {
+  
+  pretrat = function(df){
+    df = data.frame(df)
+    df = df[, c("TIMESTAMP", variable)]
+    df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+    df[[variable]] = as.numeric(df[[variable]])
+    df = df[order(df$TIMESTAMP),]
+  }
+  
+  df = pretrat(df)
+
+  # Limite duros 
+  Li = 0   # Limite inferior
+  Ls = 10  # Limite superior
+  
+  # Verificación de limites duros
+  ind.Li = which(df[[variable]] < Li)
+  ind.Ls = which(df[[variable]] > Ls)
+  
+  # Limites inferiores 
+  if (length(ind.Li) > 0) {
+    dlg_message("Se encontraron valores por debajo del límite inferior, se procederá a eliminarloss.")
+    df[ind.Li, variable] = NA
+    # Lógica para tratar los datos
+  } else {
+    dlg_message("No se encontraron valores por debajo del límite inferior.")
+  }
+  
+  # Limites superiores
+  if (length(ind.Ls) > 0) {
+    dlg_message("Se encontraron valores por encima del límite superior, se procederá a tratarlos.")
+    Limite.superior = df[ind.Ls,]
+    Limite.superior <<- Limite.superior
+    
+    # Lógica para tratar los datos
+    # Se va a verificar 3 estaciones cercanas para corroborar información 
+    dlg_message("A continuación seleccione las tres estaciones mas cercanas. ")
+    dlg_message("Seleccione la primera estación cercana.")
+    est.1 = dlg_open()$res
+    est.load.1 = fread(est.1)
+    est.load.1 = pretrat(est.load.1)
+    dlg_message("Seleccione la segunda estación cercana.")
+    est.2 = dlg_open()$res
+    est.load.2 = fread(est.2)
+    est.load.2 = pretrat(est.load.2)
+    dlg_message("Seleccione la tercera estación cercana.")
+    est.3 = dlg_open()$res
+    est.load.3 = fread(est.3)
+    est.load.3 = pretrat(est.load.3)
+    
+    est.near1 = est.load.1[est.load.1$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    est.near2 = est.load.2[est.load.2$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    est.near3 = est.load.3[est.load.3$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    
+    df.comparar = merge(Limite.superior, est.near1, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1")
+    df.comparar = merge(df.comparar, est.near2, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1", "est.near2")
+    df.comparar = merge(df.comparar, est.near3, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1", "est.near2", "est.near3")
+    
+    
+    # Método de Desviación Estándar sin ponderación --------------------------------
+    Resultados = df.comparar
+    for (i in 1:nrow(df.comparar)) {
+      precipitations = as.matrix(df.comparar[i, c("Est.objetivo", "est.near1", "est.near2", "est.near3")])
+      mean_values = mean(precipitations[,-1])
+      std_dev_values = sd(precipitations[,-1])
+      v_outlier = precipitations[,1]
+      C_final = (v_outlier - mean_values) / std_dev_values
+      valid = ifelse(abs(C_final) > 2, "Si", "No")
+      Resultados[i, "outlier_std"] = valid
+    }
+    
+    View(Resultados)
+    
+    # Elijo si desean eliminar los valores por encima del limite superior
+    msn = dlg_message("¿Desea eliminar los valores por encima del límite superior?", type = c("yesno"))$res
+    
+    if (msn == "Yes") {
+      df[ind.Ls, variable] = NA
+    } 
+
+  } else {
+    dlg_message("No se encontraron valores por encima del límite superior.")
+  }
+  
+  return(df)
+}
 
 # Función para pre procesamiento de datos 
 data_preprocess = function(df, variable){
@@ -188,5 +283,7 @@ data_preprocess = function(df, variable){
 }
 
 # Ejecución de la función ------------------------------------------------------
+df = limites.duros(data, "Lluvia_Tot")
+
 df = data_preprocess(data, "Lluvia_Tot")
 
