@@ -251,6 +251,7 @@ data_preprocess = function(df, variable){
       dlg_message("Verificar la secuencia de datos, no coincide")
       stop("Error en la secuencia de datos")
     } 
+    
     # 5. Detener el clúster
     stopCluster(cl)
     
@@ -284,11 +285,16 @@ posibles.fallas = function(df) {
     while (i <= fin - j + 1) {
       secuencia = df$Lluvia_Tot[i:(i+j-1)]
       if (length(unique(secuencia)) == 1 && unique(secuencia) != 0 && !is.na(unique(secuencia))) {
+        valor_repetido = unique(secuencia)
+        k = j
+        while (i + k <= fin && df$Lluvia_Tot[i + k] == valor_repetido) {
+          k = k + 1
+        }
         secuencias = rbind(secuencias, 
                            data.frame(inicio = i, 
-                                      fin = i + j - 1, 
-                                      valor = secuencia[1]))
-        i = i + j  # Saltar a la siguiente secuencia potencial
+                                      fin = i + k - 1, 
+                                      valor = valor_repetido))
+        i = i + k  # Saltar a la siguiente secuencia potencial
       } else {
         i = i + 1
       }
@@ -319,6 +325,7 @@ posibles.fallas = function(df) {
       tramos.repetidos(df, rango[1], rango[2], j)
     })
     
+    stopCluster(cl)
     # Combinar los resultados
     secuencias_detectadas = do.call(rbind, resultados)
     
@@ -335,7 +342,6 @@ posibles.fallas = function(df) {
     if (!is.null(resultado)) {
       return(resultado)
     }
-    stopCluster(cl)
   }
   
   tramos.repetidosSeq = function(df, inicio, fin, j) {
@@ -378,6 +384,7 @@ posibles.fallas = function(df) {
       tramos.repetidosSeq(df, rango[1], rango[2], j)
     })
     
+    stopCluster(cl)
     # Combinar los resultados
     secuencias_detectadas = do.call(rbind, resultados)
     
@@ -394,7 +401,6 @@ posibles.fallas = function(df) {
     if (!is.null(resultado)) {
       return(resultado)
     }
-    stopCluster(cl)
   }
   
   fallos.sensor = estrict.secuencia(df)
@@ -553,7 +559,143 @@ agrupamiento.horario = function(df){
   reporte.horario <<- reporte.horario
   dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.horario' ")
   
+  # Guardo los datos diarios
+  if (!dir.exists(paste0(directory, "/Datos_horarios"))) {
+    dir.create(paste0(directory, "/Datos_horarios"))
+  }
+  
+  write.csv(df, paste0(directory, "Datos_horarios/", nombre.estat, ".csv"), row.names = FALSE)
+  
+  
+  
   return(df)
+}
+
+agrupamiento.diario = function(df) {
+  datos.faltantes.diario = function(df) {
+    fecha.minima = min(df$TIMESTAMP)
+    fecha.maxima = max(df$TIMESTAMP)
+    
+    umbral.min = 10 
+    umbral.max = 15
+    
+    indices = which(is.na(df$prec))
+    fechas = df$TIMESTAMP[indices]
+    fechas = data.frame(fechas)
+    
+    fechas.1 = as.Date(fechas$fechas, format = "%Y-%m-%d")
+    fechas.1 = unique(fechas.1)
+    fechas.1 = data.frame(fechas.1)
+    
+    resultados = lapply(1:nrow(fechas.1), function(i) {
+      Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+      Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
+      
+      fechas.filtradas = fechas %>%
+        filter(fechas >= Li & fechas <= Ls)
+      # Contar el número de fechas filtradas
+      num.fechas = nrow(fechas.filtradas)
+      
+      return(num.fechas)
+    })
+    
+    
+    Nas = data.frame(fecha = fechas.1$fechas.1, num.fechas = unlist(resultados))
+    names(Nas) = c("fecha", "Na")
+    
+    fechas.comparativa = seq(as.Date(fecha.minima), as.Date(fecha.maxima), by = "1 day")
+    fechas.comparativa = data.frame(fechas.comparativa)
+    names(fechas.comparativa) = c("fecha")
+    
+    conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
+    conteo = data.frame(conteo)
+    conteo$Na[is.na(conteo$Na)] = 0
+    conteo$porcentaje = round((conteo$Na / 24) * 100,1)
+    names(conteo) = c("fecha", "Na", "% Datos_faltantes")
+    
+  
+    
+    mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
+    faltantes = nrow(mayor.umbral)
+    total = nrow(conteo)
+    
+    datos.NoAgrupadosDiarios <<- mayor.umbral
+    # construcción de tabla de reporte
+    fecha.i = as.Date(fecha.minima)
+    fecha.f = as.Date(fecha.maxima)
+    # nombre.estat = sub("_min5.csv", "", name.estacion)
+    # nombre.estat = sub("Datos_horarios/", "", nombre.estat)
+    
+    reporte = data.frame(
+      Estacion = nombre.estat,
+      periodo_estudio = paste(fecha.i, "al", fecha.f),
+      Numero_años = as.numeric(year(fecha.f) - year(fecha.i)),
+      Datos_registrados = total,
+      Datos_ausentes = faltantes,
+      porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
+      porcentaje_ausentes = round((faltantes / total) * 100,2)
+    )
+    
+    
+    reporte.diario <<- reporte
+    dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.diario' ")
+    
+    # Agrupación de datos de forma diaria --------------------------------------
+    
+    faltantes = mayor.umbral
+    names(faltantes)[1] = "TIMESTAMP"
+    
+    df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
+      mutate(TIMESTAMP = floor_date(TIMESTAMP, "day")) %>%
+      anti_join(faltantes, by = "TIMESTAMP") %>%
+      group_by(TIMESTAMP) %>%
+      summarise(prec = sum(prec, na.rm = TRUE))
+    
+    fechas.completas = fechas.comparativa
+    names(fechas.completas) = c("TIMESTAMP")
+    
+    df = left_join(fechas.completas, df.1, by = "TIMESTAMP") %>%
+      distinct() %>%
+      arrange(TIMESTAMP)
+    
+    # Gráfico los resultados ---------------------------------------------------
+    # 
+    # # divido mi df POR AÑOS
+    # año = year(df$TIMESTAMP)
+    # año = unique(año)
+    # 
+    # par(mfrow = c(3, 4))
+    # graficos = list()
+    # 
+    # # Creo carpeta para guardar los gráficos
+    # if (!dir.exists(paste0(directory, "/G_agrupacionDiaria"))) {
+    #   dir.create(paste0(directory, "/G_agrupacionDiaria"))
+    # }
+    # 
+    # for (i in 1:length(año)) {
+    #   df.año = df %>% filter(year(TIMESTAMP) == año[i])
+    #   p.1 = ggplot(df.año, aes(x = TIMESTAMP, y = prec)) +
+    #     geom_line(color = "blue") +
+    #     labs(title = paste("Precipitación en el año", año[i]), x = "Fecha", y = "Precipitación (mm)") +
+    #     theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+    #   graficos[[i]] = p.1
+    # }
+    # 
+    # p.f = grid.arrange(grobs = graficos)
+    # # ggsave(paste0(directory, "G_agrupacionDiaria/", nombre.estat, "_diario.png"),
+    # #        plot = p.f, width = 12, height = 8, units = "in", dpi = 300, type = "cairo")
+    # 
+    # 
+    # Guardo los datos diarios
+    if (!dir.exists(paste0(directory, "/Datos_diarios"))) {
+      dir.create(paste0(directory, "/Datos_diarios"))
+    }
+
+    write.csv(df, paste0(directory, "Datos_diarios/", nombre.estat, ".csv"), row.names = FALSE)
+    
+    return(df)
+    
+  }
 }
 
 # Análisis de outliers 
@@ -584,25 +726,30 @@ outliers.analisis = function(df) {
 }
 
 # Análisis posibles sequías 
-posibles.sequias = function(df) {
-  
-}
+
 
 ################################################################################
 # ------------------------ Ejecución de la función -----------------------------
-data = fread(file.path(directory, "ElLabradoM_min5.csv"))
+data = fread(file.path(directory, "JimaM_min5.csv"))
+data = data[-1,]
+
+nombre.estat = "JimaM_min5"
 df = limites.duros(data, "Lluvia_Tot") # Límites duros
 df = data_preprocess(df, "Lluvia_Tot") # Pre procesamiento
+summary(df)
+vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
+vacios
+
 fallas_sequias = posibles.fallas(df) # Posibles fallas
 datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
+datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
 ################################################################################
+
+
 
 prueba = datos.horarios
 prueba$mes = month(prueba$TIMESTAMP)
 prueba$año = year(prueba$TIMESTAMP)
-
-
-
 # Selecciono solo los datos que van desde octubre a mayo
 df.3 = prueba %>% filter(mes >= 10 | mes <= 5)
 df.3 = prueba %>% filter(mes >= 6 & mes <= 9)
@@ -629,6 +776,7 @@ write.csv2(df, file.path(directory.save, "ElLabradoM_min5.csv"), row.names = FAL
 data.c = fread(file.path(directory.save, "ElLabradoM_min5.csv"))
 data.t = data.c
 data.c$Lluvia_Tot = as.double(data.c$Lluvia_Tot)
+
 # Comrobacion final
 pretrat = function(df, variable){
   df = data.frame(df)
@@ -637,6 +785,5 @@ pretrat = function(df, variable){
   df[[variable]] = as.numeric(df[[variable]])
   df = df[order(df$TIMESTAMP),]
 }
-
 data.2 = pretrat(data, "Lluvia_Tot")
 summary(data.2)
