@@ -29,7 +29,7 @@ limites.duros = function(df, variable) {
   }
   
   df = pretrat(df)
-
+  
   # Limite duros 
   Li = 0   # Limite inferior
   Ls = 20  # Limite superior
@@ -100,7 +100,7 @@ limites.duros = function(df, variable) {
     if (msn == "yes") {
       df[ind.Ls, variable] = NA
     } 
-
+    
   } else {
     dlg_message("No se encontraron valores por encima del límite superior.")
   }
@@ -280,7 +280,7 @@ data_preprocess = function(df, variable){
 
 # Función para ver si hay valores seguidos continuos
 posibles.fallas = function(df) {
-# Secuencia estricta y Normal --------------------------------------------------
+  # Secuencia estricta y Normal --------------------------------------------------
   tramos.repetidos = function(df, inicio, fin, j) {
     secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
     i = inicio
@@ -308,7 +308,7 @@ posibles.fallas = function(df) {
     num_cores = detectCores() - 1  # Usar todos los cores menos uno
     cl = makeCluster(num_cores)
     registerDoParallel(cl)
-      
+    
     clusterExport(cl, c("tramos.repetidos", "df", "j"))
     # Cargar dplyr en cada nodo
     clusterEvalQ(cl, library(dplyr))
@@ -403,18 +403,148 @@ posibles.fallas = function(df) {
   fallos.sensor = estrict.secuencia(df)
   posibles.Seq = sequia.secuencia(df)
   
-  return(list(fallas_sensor = fallos.sensor, posibles_sequias = posibles.Seq))
-  
+  # Lógica para visualizar valores antes de eliminarlos 
+  if (!is.null(fallos.sensor)){
+    View(fallos.sensor)
+    msj_temp = dlg_message("Se encontraron tramos temporales repetidos (Posibles fallas del sensor) Desea remplazar por NA dichos valores?", type = c("yesno"))$res
+    if (msj_temp == "yes") {
+      for (i in 1:nrow(fallos.sensor)) {
+        fecha_inicio <- fallos.sensor$fecha_inicio[i]
+        fecha_fin <- fallos.sensor$fecha_fin[i]
+        df$Lluvia_Tot[df$TIMESTAMP >= fecha_inicio & df$TIMESTAMP<= fecha_fin] <- NA
+      }
+    } 
+  } else {
+    dlg_message("No se encontraron posibles fallas en el sensor")
   }
   
+  # Lógica para verificar asegurarse que sean sequías
+  if (!is.null(posibles.Seq)){
+    msj_seq = dlg_message("Se encontraron tramos temporales repetidos (Posibles sequias).")$res
+    View(posibles.Seq)
+  }
+  return(list(fallas_sensor = fallos.sensor, posibles_sequias = posibles.Seq, df = df))
+}
+
+# agrupamiento horario
+agrupamiento.horario = function(df){
+  umbral.min = 10 # examinar esto
+  umbral.max = 15
+  
+  fecha.minima = min(df$TIMESTAMP)
+  fecha.maxima = max(df$TIMESTAMP)
+  indices = which(is.na(df$Lluvia_Tot))
+  fechas = df$TIMESTAMP[indices]
+  fechas = data.frame(fechas)
+  
+  fechas.1 = as.Date(fechas$fechas, format = "%Y-%m-%d")
+  fechas.1 = unique(fechas.1)
+  fechas.1 = data.frame(fechas.1)
+  
+  resultados = lapply(1:nrow(fechas.1), function(i) {
+    Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    num_fechas.horaria = sapply(horas, function(hora) {
+      fechas.filtradas = fechas %>%
+        filter(fechas >= hora & fechas < hora + hours(1))
+      
+      return(nrow(fechas.filtradas))
+      
+    })
+    return(num_fechas.horaria)
+  })
+  
+  horas.seq = lapply(1:nrow(fechas.1), function(i) {
+    Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    return(horas)
+  })
+  
+  horas.seq = do.call(rbind, lapply(horas.seq , function(x) data.frame(fecha = x)))
+  Nas = data.frame(fecha = horas.seq$fecha, num.fechas = unlist(resultados))
+  names(Nas) = c("fecha", "Na")
+  
+  # Error aqui, al hacer secuencia horaria no estoy teniendo que si inicio a las 4:40 la secuencia se hara de esa forma y no de forma correcta
+  fechas.comparativa = seq(as.POSIXct(fecha.minima), as.POSIXct(fecha.maxima), by = "hour")
+  fechas.comparativa = trunc(fechas.comparativa, "hour")
+  fechas.comparativa = data.frame(fechas.comparativa)
+  names(fechas.comparativa) = c("fecha")
+  
+  # posible error aquí 
+  conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
+  conteo = data.frame(conteo)
+  conteo$Na[is.na(conteo$Na)] = 0
+  conteo$porcentaje = round((conteo$Na / 12) * 100,2)
+  names(conteo) = c("fecha", "Na", "% Datos_faltantes")
+  summary.Nas <<- conteo
+  
+  mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
+  
+  faltantes = mayor.umbral
+  names(faltantes)[1] = "TIMESTAMP"
+  
+  df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
+    mutate(TIMESTAMP = floor_date(TIMESTAMP, "hour")) %>%
+    anti_join(faltantes, by = "TIMESTAMP") %>%
+    group_by(TIMESTAMP) %>%
+    summarise(Lluvia_Tot = sum(Lluvia_Tot, na.rm = TRUE))
+  
+  fechas.completas = fechas.comparativa
+  names(fechas.completas) = c("TIMESTAMP")
+  df = merge(fechas.completas, df.1, by = "TIMESTAMP", all = TRUE)
+  df = df[order(df$TIMESTAMP),]
+  
+  # En pruebas --------------------------------------------------------------
+  # Descripción: Incorporar gráfico para ver la distribución de los datos que no fueron agrupados
+  # de manera horaria, verificar como están distribuios y considerar agruparlos si el umbral 
+  # es mayor al 15 %
+  indices.vac = which(is.na(df$Luvia_Tot))
+  fechas.vac = df$TIMESTAMP[indices.vac]
+  fechas.vac = data.frame(fechas.vac)
+  names(fechas.vac) = c("TIMESTAMP")
+  
+  data.rev = merge(fechas.vac, faltantes, by = "TIMESTAMP")
+  
+  indices.mayor15 = which(data.rev$`% Datos_faltantes` <= umbral.max)
+  if (any(indices.mayor15)) {
+    dlg_message("Se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15), revise los datos faltantes")
+    stop("Se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15), revise los datos faltantes")
+  } else {
+    dlg_message("No se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15)")
+  }
+  
+  # Reporte -----------------------------------------------------------------
+  
+  # nombre.estat = sub("_min5.csv", "", name.estacion)
+  faltantes = sum(is.na(df$Lluvia_Tot))
+  total = nrow(df)
+  
+  reporte.horario = data.frame(
+    periodo_estudio = paste(fecha.minima, "al", fecha.maxima),
+    Numero_años = as.numeric(year(fecha.maxima) - year(fecha.minima)),
+    Datos_registrados = total,
+    Datos_ausentes = faltantes,
+    porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
+    porcentaje_ausentes = round((faltantes / total) * 100,2)
+  )  
+  
+  reporte.horario <<- reporte.horario
+  dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.horario' ")
+  
+  return(df)
+}
+
 
 ################################################################################
 # ------------------------ Ejecución de la función -----------------------------
 data = fread(file.path(directory, "ElLabradoM_min5.csv"))
-
 df = limites.duros(data, "Lluvia_Tot") # Límites duros
 df = data_preprocess(df, "Lluvia_Tot") # Pre procesamiento
 fallas_sequias = posibles.fallas(df) # Posibles fallas
+datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
+################################################################################
 
 
 
