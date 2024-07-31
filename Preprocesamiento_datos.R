@@ -16,7 +16,7 @@ directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FA
 # Función para los limites duros de la base de datos
 limites.duros = function(df, variable) {
   
-  # 1. Deteccion de umbrales
+  # 1. Detección de umbrales
   pretrat = function(df){
     df = data.frame(df)
     df = df[, c("TIMESTAMP", variable)]
@@ -581,6 +581,11 @@ outliers.analisis = function(df) {
       return(length(outliers))
     })
   })
+}
+
+# Análisis posibles sequías 
+posibles.sequias = function(df) {
+  
 }
 
 ################################################################################
