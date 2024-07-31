@@ -1,22 +1,108 @@
 ################################################################################
 # Readme -----------------------------------------------------------------------
 ######### Reportes de la versión 
-# Versión: 3.0.0
-# Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad)
+# Versión: 2.0.0
+# Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad).
 # Se plantea la opción de utilizar paralelización para hacer el procedimiento mas rápido (Testear funcionalidad).
-# * Nota: Proceso de paralelizar resulta poco eficiente (Testear funcionalidad)
 # Librerías necesarias ---------------------------------------------------------
-library(data.table)
-library(dplyr)
-library(foreach)
-library(doParallel)
-library(svDialogs)
-library(lubridate)
+library(pacman)
+p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate)
+
 ################################################################################
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
-data = fread(file.path(directory, "ChanludM_min5.csv"))
-data = data[-1,]
+################################################################################
+# ----------------------- Funciones implementadas ------------------------------
+# Función para los limites duros de la base de datos
+limites.duros = function(df, variable) {
+  
+  # 1. Deteccion de umbrales
+  pretrat = function(df){
+    df = data.frame(df)
+    df = df[, c("TIMESTAMP", variable)]
+    df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+    df[[variable]] = as.numeric(df[[variable]])
+    df = df[order(df$TIMESTAMP),]
+  }
+  
+  df = pretrat(df)
+  
+  # Limite duros 
+  Li = 0   # Limite inferior
+  Ls = 20  # Limite superior
+  
+  # Verificación de limites duros
+  ind.Li = which(df[[variable]] < Li)
+  ind.Ls = which(df[[variable]] > Ls)
+  
+  # Limites inferiores 
+  if (length(ind.Li) > 0) {
+    dlg_message("Se encontraron valores por debajo del límite inferior, se procederá a eliminarloss.")
+    df[ind.Li, variable] = NA
+    # Lógica para tratar los datos
+  } else {
+    dlg_message("No se encontraron valores por debajo del límite inferior.")
+  }
+  
+  # Limites superiores
+  if (length(ind.Ls) > 0) {
+    dlg_message("Se encontraron valores por encima del límite superior, se procederá a tratarlos.")
+    Limite.superior = df[ind.Ls,]
+    Limite.superior <<- Limite.superior
+    
+    # Lógica para tratar los datos
+    # Se va a verificar 3 estaciones cercanas para corroborar información 
+    dlg_message("A continuación seleccione las tres estaciones mas cercanas. ")
+    dlg_message("Seleccione la primera estación cercana.")
+    est.1 = dlg_open()$res
+    est.load.1 = fread(est.1)
+    est.load.1 = pretrat(est.load.1)
+    dlg_message("Seleccione la segunda estación cercana.")
+    est.2 = dlg_open()$res
+    est.load.2 = fread(est.2)
+    est.load.2 = pretrat(est.load.2)
+    dlg_message("Seleccione la tercera estación cercana.")
+    est.3 = dlg_open()$res
+    est.load.3 = fread(est.3)
+    est.load.3 = pretrat(est.load.3)
+    
+    est.near1 = est.load.1[est.load.1$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    est.near2 = est.load.2[est.load.2$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    est.near3 = est.load.3[est.load.3$TIMESTAMP %in% Limite.superior$TIMESTAMP, ]
+    
+    df.comparar = merge(Limite.superior, est.near1, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1")
+    df.comparar = merge(df.comparar, est.near2, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1", "est.near2")
+    df.comparar = merge(df.comparar, est.near3, by = "TIMESTAMP", all = TRUE)
+    names(df.comparar) = c("TIMESTAMP", "Est.objetivo", "est.near1", "est.near2", "est.near3")
+    
+    # Método de Desviación Estándar sin ponderación ----------------------------
+    Resultados = df.comparar
+    for (i in 1:nrow(df.comparar)) {
+      precipitations = as.matrix(df.comparar[i, c("Est.objetivo", "est.near1", "est.near2", "est.near3")])
+      mean_values = mean(precipitations[,-1], na.rm = TRUE)
+      std_dev_values = sd(precipitations[,-1], na.rm = TRUE)
+      v_outlier = precipitations[,1]
+      C_final = (v_outlier - mean_values) / std_dev_values
+      valid = ifelse(abs(C_final) > 2, "Si", "No")
+      Resultados[i, "outlier_std"] = valid
+    }
+    
+    View(Resultados)
+    
+    # Elijo si desean eliminar los valores por encima del limite superior
+    msn = dlg_message("¿Desea eliminar los valores por encima del límite superior?", type = c("yesno"))$res
+    
+    if (msn == "yes") {
+      df[ind.Ls, variable] = NA
+    } 
+    
+  } else {
+    dlg_message("No se encontraron valores por encima del límite superior.")
+  }
+  return(df)
+}
 
 # Función para pre procesamiento de datos 
 data_preprocess = function(df, variable){
@@ -25,9 +111,10 @@ data_preprocess = function(df, variable){
   df = df[, c("TIMESTAMP", variable)]
   df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
   df[[variable]] = as.numeric(df[[variable]])
+  df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
   df = df[order(df$TIMESTAMP),]
   
-  # Identificación y eliminación de duplicados ---------------------------------
+  # Identificación y eliminación de fechas repetidas ---------------------------
   ind.duplicated = which(duplicated(df$TIMESTAMP) | duplicated(df$TIMESTAMP, fromLast = TRUE))
   if (length(ind.duplicated) > 0) {
     dlg_message("Se encontraron duplicados en la base de datos, se procederá a eliminarlos. (Verifique los datos duplicados en la variable 'datos.duplicados')")
@@ -188,6 +275,363 @@ data_preprocess = function(df, variable){
   return(df.final)
 }
 
-# Ejecución de la función ------------------------------------------------------
-df = data_preprocess(data, "Lluvia_Tot")
+# Función para ver si hay valores seguidos continuos
+posibles.fallas = function(df) {
+  # Secuencia estricta y Normal ------------------------------------------------
+  tramos.repetidos = function(df, inicio, fin, j) {
+    secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
+    i = inicio
+    while (i <= fin - j + 1) {
+      secuencia = df$Lluvia_Tot[i:(i+j-1)]
+      if (length(unique(secuencia)) == 1 && unique(secuencia) != 0 && !is.na(unique(secuencia))) {
+        secuencias = rbind(secuencias, 
+                           data.frame(inicio = i, 
+                                      fin = i + j - 1, 
+                                      valor = secuencia[1]))
+        i = i + j  # Saltar a la siguiente secuencia potencial
+      } else {
+        i = i + 1
+      }
+    }
+    return(secuencias)
+  }
+  
+  tramos.repetidos <<- tramos.repetidos
+  
+  estrict.secuencia = function(df) {
+    j = 288
+    j <<- j
+    # Configuro la paralelización
+    num_cores = detectCores() - 1  # Usar todos los cores menos uno
+    cl = makeCluster(num_cores)
+    registerDoParallel(cl)
+    
+    clusterExport(cl, c("tramos.repetidos", "df", "j"))
+    # Cargar dplyr en cada nodo
+    clusterEvalQ(cl, library(dplyr))
+    # Dividir el rango de índices entre los cores
+    n = nrow(df)
+    chunk_size = ceiling(n / num_cores)
+    rangos = lapply(seq(1, n, by = chunk_size), function(x) c(x, min(x + chunk_size - 1, n)))
+    
+    # Aplicar la función en paralelo
+    resultados = parLapply(cl, rangos, function(rango) {
+      tramos.repetidos(df, rango[1], rango[2], j)
+    })
+    
+    # Combinar los resultados
+    secuencias_detectadas = do.call(rbind, resultados)
+    
+    # Crear el dataframe final con las fechas
+    if (nrow(secuencias_detectadas) > 0) {
+      resultado = secuencias_detectadas %>%
+        mutate(fecha_inicio = df$TIMESTAMP[inicio],
+               fecha_fin = df$TIMESTAMP[fin]) %>%
+        select(fecha_inicio, fecha_fin, valor)
+    } else {
+      resultado = NULL
+    }
+    
+    if (!is.null(resultado)) {
+      return(resultado)
+    }
+    stopCluster(cl)
+  }
+  
+  tramos.repetidosSeq = function(df, inicio, fin, j) {
+    secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
+    i = inicio
+    while (i <= fin - j + 1) {
+      secuencia = df$Lluvia_Tot[i:(i+j-1)]
+      if (length(unique(secuencia)) == 1 && unique(secuencia) == 0 && !is.na(unique(secuencia))) {
+        secuencias = rbind(secuencias, 
+                           data.frame(inicio = i, 
+                                      fin = i + j - 1, 
+                                      valor = secuencia[1]))
+        i = i + j  # Saltar a la siguiente secuencia potencial
+      } else {
+        i = i + 1
+      }
+    }
+    return(secuencias)
+  }
+  
+  tramos.repetidosSeq <<- tramos.repetidosSeq
+  sequia.secuencia = function(df) {
+    j = 288
+    j <<- j
+    # Configuro la paralelización
+    num_cores = detectCores() - 1  # Usar todos los cores menos uno
+    cl = makeCluster(num_cores)
+    registerDoParallel(cl)
+    
+    clusterExport(cl, c("tramos.repetidosSeq", "df", "j"))
+    # Cargar dplyr en cada nodo
+    clusterEvalQ(cl, library(dplyr))
+    # Dividir el rango de índices entre los cores
+    n = nrow(df)
+    chunk_size = ceiling(n / num_cores)
+    rangos = lapply(seq(1, n, by = chunk_size), function(x) c(x, min(x + chunk_size - 1, n)))
+    
+    # Aplicar la función en paralelo
+    resultados = parLapply(cl, rangos, function(rango) {
+      tramos.repetidosSeq(df, rango[1], rango[2], j)
+    })
+    
+    # Combinar los resultados
+    secuencias_detectadas = do.call(rbind, resultados)
+    
+    # Crear el dataframe final con las fechas
+    if (nrow(secuencias_detectadas) > 0) {
+      resultado = secuencias_detectadas %>%
+        mutate(fecha_inicio = df$TIMESTAMP[inicio],
+               fecha_fin = df$TIMESTAMP[fin]) %>%
+        select(fecha_inicio, fecha_fin, valor)
+    } else {
+      resultado = NULL
+    }
+    
+    if (!is.null(resultado)) {
+      return(resultado)
+    }
+    stopCluster(cl)
+  }
+  
+  fallos.sensor = estrict.secuencia(df)
+  posibles.Seq = sequia.secuencia(df)
+  
+  # Lógica para visualizar valores antes de eliminarlos 
+  if (!is.null(fallos.sensor)){
+    View(fallos.sensor)
+    msj_temp = dlg_message("Se encontraron tramos temporales repetidos (Posibles fallas del sensor) Desea remplazar por NA dichos valores?", type = c("yesno"))$res
+    if (msj_temp == "yes") {
+      for (i in 1:nrow(fallos.sensor)) {
+        fecha_inicio <- fallos.sensor$fecha_inicio[i]
+        fecha_fin <- fallos.sensor$fecha_fin[i]
+        df$Lluvia_Tot[df$TIMESTAMP >= fecha_inicio & df$TIMESTAMP<= fecha_fin] <- NA
+      }
+    } 
+  } else {
+    dlg_message("No se encontraron posibles fallas en el sensor")
+  }
+  
+  # Lógica para verificar asegurarse que sean sequías
+  if (!is.null(posibles.Seq)){
+    msj_seq = dlg_message("Se encontraron tramos temporales repetidos (Posibles sequias).")$res
+    View(posibles.Seq)
+  }
+  return(list(fallas_sensor = fallos.sensor, posibles_sequias = posibles.Seq, df = df))
+}
 
+# agrupamiento horario
+agrupamiento.horario = function(df){
+  umbral.min = 10 # % de vacíos continuos  
+  umbral.max = 15 # % de vacíos en no continuos
+  
+  fecha.minima = min(df$TIMESTAMP)
+  fecha.maxima = max(df$TIMESTAMP)
+  indices = which(is.na(df$Lluvia_Tot))
+  fechas = df$TIMESTAMP[indices]
+  fechas = data.frame(fechas)
+  
+  fechas.1 = as.Date(fechas$fechas, format = "%Y-%m-%d")
+  fechas.1 = unique(fechas.1)
+  fechas.1 = data.frame(fechas.1)
+  
+  resultados = lapply(1:nrow(fechas.1), function(i) {
+    Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    num_fechas.horaria = sapply(horas, function(hora) {
+      fechas.filtradas = fechas %>%
+        filter(fechas >= hora & fechas < hora + hours(1))
+      return(nrow(fechas.filtradas))
+      
+    })
+    return(num_fechas.horaria)
+  })
+  
+  # fechas.2 = data.frame(as.Date(df$TIMESTAMP, format = "%Y-%m-%d"))
+  # fechas.2 = unique(fechas.2)
+  # names(fechas.2) = c("fecha")
+  # 
+  # # Búsqueda de outliers -------------------------------------------------------
+  # outliers.BD = lapply(1:nrow(fechas.2), function(i) {
+  #   Li = as.POSIXct(paste0(fechas.2[i, ], " 00:00:00"), tz = "UTC")
+  #   Ls = as.POSIXct(paste0(fechas.2[i, ], " 23:55:00"), tz = "UTC")
+  #   horas = seq(Li, Ls, by = "hour")
+  #   # Analizo outliers 
+  #   num_fechas.horaria = sapply(horas, function(hora) {
+  #     fechas.filtradas = df %>%
+  #       filter(TIMESTAMP >= Li & TIMESTAMP < Ls)
+  #     Q1 = quantile(fechas.filtradas$Lluvia_Tot, 0.25, na.rm = TRUE)
+  #     Q3 = quantile(fechas.filtradas$Lluvia_Tot, 0.75, na.rm = TRUE)
+  #     IQR <- Q3 - Q1   
+  #     lower_bound <- Q1 - 1.5 * IQR
+  #     upper_bound <- Q3 + 1.5 * IQR
+  #     outliers <- fechas.filtradas$Lluvia_Tot[fechas.filtradas$Lluvia_Tot < lower_bound | fechas.filtradas$Lluvia_Tot > upper_bound]
+  #     return(length(outliers))
+  #   })
+
+  # })
+  # 
+  horas.seq = lapply(1:nrow(fechas.1), function(i) {
+    Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    return(horas)
+  })
+  
+  horas.seq = do.call(rbind, lapply(horas.seq , function(x) data.frame(fecha = x)))
+  Nas = data.frame(fecha = horas.seq$fecha, num.fechas = unlist(resultados))
+  names(Nas) = c("fecha", "Na")
+  
+  # 
+  fechas.comparativa = seq(as.POSIXct(fecha.minima), as.POSIXct(fecha.maxima), by = "hour")
+  fechas.comparativa = trunc(fechas.comparativa, "hour")
+  fechas.comparativa = data.frame(fechas.comparativa)
+  names(fechas.comparativa) = c("fecha")
+  
+  # 
+  conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
+  conteo = data.frame(conteo)
+  conteo$Na[is.na(conteo$Na)] = 0
+  conteo$porcentaje = round((conteo$Na / 12) * 100,2)
+  names(conteo) = c("fecha", "Na", "% Datos_faltantes")
+  
+  mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
+  
+  faltantes = mayor.umbral
+  names(faltantes)[1] = "TIMESTAMP"
+  datos.descartados <<- faltantes
+  
+  df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
+    mutate(TIMESTAMP = floor_date(TIMESTAMP, "hour")) %>%
+    anti_join(faltantes, by = "TIMESTAMP") %>%
+    group_by(TIMESTAMP) %>%
+    summarise(Lluvia_Tot = sum(Lluvia_Tot, na.rm = TRUE))
+  
+  fechas.completas = fechas.comparativa
+  names(fechas.completas) = c("TIMESTAMP")
+  df = merge(fechas.completas, df.1, by = "TIMESTAMP", all = TRUE)
+  df = df[order(df$TIMESTAMP),]
+  
+  # En pruebas --------------------------------------------------------------
+  # Descripción: Incorporar gráfico para ver la distribución de los datos que no fueron agrupados
+  # de manera horaria, verificar como están distribuios y considerar agruparlos si el umbral 
+  # es mayor al 15 %
+  indices.vac = which(is.na(df$Luvia_Tot))
+  fechas.vac = df$TIMESTAMP[indices.vac]
+  fechas.vac = data.frame(fechas.vac)
+  names(fechas.vac) = c("TIMESTAMP")
+  
+  data.rev = merge(fechas.vac, faltantes, by = "TIMESTAMP")
+  
+  indices.mayor15 = which(data.rev$`% Datos_faltantes` <= umbral.max)
+  if (any(indices.mayor15)) {
+    dlg_message("Se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15), revise los datos faltantes")
+    stop("Se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15), revise los datos faltantes")
+  } else {
+    dlg_message("No se encontraron fechas con un porcentaje de datos faltantes menor al umbral máximo (15)")
+  }
+  
+  # Reporte -----------------------------------------------------------------
+  
+  # nombre.estat = sub("_min5.csv", "", name.estacion)
+  faltantes = sum(is.na(df$Lluvia_Tot))
+  total = nrow(df)
+  
+  reporte.horario = data.frame(
+    periodo_estudio = paste(fecha.minima, "al", fecha.maxima),
+    Numero_años = as.numeric(year(fecha.maxima) - year(fecha.minima)),
+    Datos_registrados = total,
+    Datos_ausentes = faltantes,
+    porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
+    porcentaje_ausentes = round((faltantes / total) * 100,2)
+  )  
+  
+  reporte.horario <<- reporte.horario
+  dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.horario' ")
+  
+  return(df)
+}
+
+# Análisis de outliers 
+outliers.analisis = function(df) {
+  fechas = data.frame(as.Date(df$TIMESTAMP, format = "%Y-%m-%d"))
+  fechas = unique(fechas)
+  names(fechas) = c("fecha")
+  
+  # Búsqueda de outliers -------------------------------------------------------
+  outliers.BD = lapply(1:nrow(fechas), function(i) {
+    Li = as.POSIXct(paste0(fechas[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas[i, ], " 23:00:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    # Analizo outliers
+    num_fechas.horaria = sapply(horas, function(hora) {
+      fechas.filtradas = df %>%
+        filter(TIMESTAMP >= Li & TIMESTAMP <= Ls)
+      
+      Q1 = quantile(fechas.filtradas$Lluvia_Tot, 0.25, na.rm = TRUE)
+      Q3 = quantile(fechas.filtradas$Lluvia_Tot, 0.75, na.rm = TRUE)
+      IQR = Q3 - Q1
+      lower_bound = Q1 - 1.5 * IQR
+      upper_bound = Q3 + 1.5 * IQR
+      outliers = fechas.filtradas$Lluvia_Tot[fechas.filtradas$Lluvia_Tot < lower_bound | fechas.filtradas$Lluvia_Tot > upper_bound]
+      return(length(outliers))
+    })
+  })
+}
+
+################################################################################
+# ------------------------ Ejecución de la función -----------------------------
+data = fread(file.path(directory, "ElLabradoM_min5.csv"))
+df = limites.duros(data, "Lluvia_Tot") # Límites duros
+df = data_preprocess(df, "Lluvia_Tot") # Pre procesamiento
+fallas_sequias = posibles.fallas(df) # Posibles fallas
+datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
+################################################################################
+
+prueba = datos.horarios
+prueba$mes = month(prueba$TIMESTAMP)
+prueba$año = year(prueba$TIMESTAMP)
+
+
+
+# Selecciono solo los datos que van desde octubre a mayo
+df.3 = prueba %>% filter(mes >= 10 | mes <= 5)
+df.3 = prueba %>% filter(mes >= 6 & mes <= 9)
+summary(df.3)
+
+Q1 = quantile(df.3$Lluvia_Tot, 0.25, na.rm = TRUE)
+Q3 = quantile(df.3$Lluvia_Tot, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1   
+
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+outliers <- df.3$Lluvia_Tot[df.3$Lluvia_Tot < lower_bound | df.3$Lluvia_Tot > upper_bound]
+
+boxplot(df.3$Lluvia_Tot, main="Detección de Outliers en Lluvia_Tot usando IQR", ylab="Lluvia_Tot", xlab="Data")
+points(which(df.3$Lluvia_Tot %in% outliers), outliers, col="red", pch=19)
+
+summary(df)
+vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
+vacios
+
+directory.save = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL/Base datos procesada/Precipitación"
+write.csv2(df, file.path(directory.save, "ElLabradoM_min5.csv"), row.names = FALSE)
+data.c = fread(file.path(directory.save, "ElLabradoM_min5.csv"))
+data.t = data.c
+data.c$Lluvia_Tot = as.double(data.c$Lluvia_Tot)
+# Comrobacion final
+pretrat = function(df, variable){
+  df = data.frame(df)
+  df = df[, c("TIMESTAMP", variable)]
+  df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+  df[[variable]] = as.numeric(df[[variable]])
+  df = df[order(df$TIMESTAMP),]
+}
+
+data.2 = pretrat(data, "Lluvia_Tot")
+summary(data.2)
