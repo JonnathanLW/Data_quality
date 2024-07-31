@@ -2,9 +2,8 @@
 # Readme -----------------------------------------------------------------------
 ######### Reportes de la versión 
 # Versión: 2.0.0
-# Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad)
+# Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad).
 # Se plantea la opción de utilizar paralelización para hacer el procedimiento mas rápido (Testear funcionalidad).
-# * Nota: Proceso de paralelizar resulta poco eficiente (Testear funcionalidad)
 # Librerías necesarias ---------------------------------------------------------
 library(data.table)
 library(dplyr)
@@ -15,13 +14,12 @@ library(lubridate)
 ################################################################################
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
-data = fread(file.path(directory, "JimaM_min5.csv"))
-
 ################################################################################
-# Funciones implementadas ------------------------------------------------------
+# ----------------------- Funciones implementadas ------------------------------
 # Función para los limites duros de la base de datos
 limites.duros = function(df, variable) {
   
+  # 1. Deteccion de umbrales
   pretrat = function(df){
     df = data.frame(df)
     df = df[, c("TIMESTAMP", variable)]
@@ -34,7 +32,7 @@ limites.duros = function(df, variable) {
 
   # Limite duros 
   Li = 0   # Limite inferior
-  Ls = 10  # Limite superior
+  Ls = 20  # Limite superior
   
   # Verificación de limites duros
   ind.Li = which(df[[variable]] < Li)
@@ -119,7 +117,7 @@ data_preprocess = function(df, variable){
   df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
   df = df[order(df$TIMESTAMP),]
   
-  # Identificación y eliminación de duplicados ---------------------------------
+  # Identificación y eliminación de fechas repetidas ---------------------------
   ind.duplicated = which(duplicated(df$TIMESTAMP) | duplicated(df$TIMESTAMP, fromLast = TRUE))
   if (length(ind.duplicated) > 0) {
     dlg_message("Se encontraron duplicados en la base de datos, se procederá a eliminarlos. (Verifique los datos duplicados en la variable 'datos.duplicados')")
@@ -280,7 +278,164 @@ data_preprocess = function(df, variable){
   return(df.final)
 }
 
-# Ejecución de la función ------------------------------------------------------
-df = limites.duros(data, "Lluvia_Tot")
-df = data_preprocess(df, "Lluvia_Tot")
+# Función para ver si hay valores seguidos continuos
+posibles.fallas = function(df) {
+# Secuencia estricta y Normal --------------------------------------------------
+  tramos.repetidos = function(df, inicio, fin, j) {
+    secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
+    i = inicio
+    while (i <= fin - j + 1) {
+      secuencia = df$Lluvia_Tot[i:(i+j-1)]
+      if (length(unique(secuencia)) == 1 && unique(secuencia) != 0 && !is.na(unique(secuencia))) {
+        secuencias = rbind(secuencias, 
+                           data.frame(inicio = i, 
+                                      fin = i + j - 1, 
+                                      valor = secuencia[1]))
+        i = i + j  # Saltar a la siguiente secuencia potencial
+      } else {
+        i = i + 1
+      }
+    }
+    return(secuencias)
+  }
+  
+  tramos.repetidos <<- tramos.repetidos
+  
+  estrict.secuencia = function(df) {
+    j = 288
+    j <<- j
+    # Configuro la paralelización
+    num_cores = detectCores() - 1  # Usar todos los cores menos uno
+    cl = makeCluster(num_cores)
+    registerDoParallel(cl)
+      
+    clusterExport(cl, c("tramos.repetidos", "df", "j"))
+    # Cargar dplyr en cada nodo
+    clusterEvalQ(cl, library(dplyr))
+    # Dividir el rango de índices entre los cores
+    n = nrow(df)
+    chunk_size = ceiling(n / num_cores)
+    rangos = lapply(seq(1, n, by = chunk_size), function(x) c(x, min(x + chunk_size - 1, n)))
+    
+    # Aplicar la función en paralelo
+    resultados = parLapply(cl, rangos, function(rango) {
+      tramos.repetidos(df, rango[1], rango[2], j)
+    })
+    
+    # Combinar los resultados
+    secuencias_detectadas = do.call(rbind, resultados)
+    
+    # Crear el dataframe final con las fechas
+    if (nrow(secuencias_detectadas) > 0) {
+      resultado = secuencias_detectadas %>%
+        mutate(fecha_inicio = df$TIMESTAMP[inicio],
+               fecha_fin = df$TIMESTAMP[fin]) %>%
+        select(fecha_inicio, fecha_fin, valor)
+    } else {
+      resultado = NULL
+    }
+    
+    if (!is.null(resultado)) {
+      return(resultado)
+    }
+    stopCluster(cl)
+  }
+  
+  tramos.repetidosSeq = function(df, inicio, fin, j) {
+    secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
+    i = inicio
+    while (i <= fin - j + 1) {
+      secuencia = df$Lluvia_Tot[i:(i+j-1)]
+      if (length(unique(secuencia)) == 1 && unique(secuencia) == 0 && !is.na(unique(secuencia))) {
+        secuencias = rbind(secuencias, 
+                           data.frame(inicio = i, 
+                                      fin = i + j - 1, 
+                                      valor = secuencia[1]))
+        i = i + j  # Saltar a la siguiente secuencia potencial
+      } else {
+        i = i + 1
+      }
+    }
+    return(secuencias)
+  }
+  
+  tramos.repetidosSeq <<- tramos.repetidosSeq
+  sequia.secuencia = function(df) {
+    j = 288
+    j <<- j
+    # Configuro la paralelización
+    num_cores = detectCores() - 1  # Usar todos los cores menos uno
+    cl = makeCluster(num_cores)
+    registerDoParallel(cl)
+    
+    clusterExport(cl, c("tramos.repetidosSeq", "df", "j"))
+    # Cargar dplyr en cada nodo
+    clusterEvalQ(cl, library(dplyr))
+    # Dividir el rango de índices entre los cores
+    n = nrow(df)
+    chunk_size = ceiling(n / num_cores)
+    rangos = lapply(seq(1, n, by = chunk_size), function(x) c(x, min(x + chunk_size - 1, n)))
+    
+    # Aplicar la función en paralelo
+    resultados = parLapply(cl, rangos, function(rango) {
+      tramos.repetidosSeq(df, rango[1], rango[2], j)
+    })
+    
+    # Combinar los resultados
+    secuencias_detectadas = do.call(rbind, resultados)
+    
+    # Crear el dataframe final con las fechas
+    if (nrow(secuencias_detectadas) > 0) {
+      resultado = secuencias_detectadas %>%
+        mutate(fecha_inicio = df$TIMESTAMP[inicio],
+               fecha_fin = df$TIMESTAMP[fin]) %>%
+        select(fecha_inicio, fecha_fin, valor)
+    } else {
+      resultado = NULL
+    }
+    
+    if (!is.null(resultado)) {
+      return(resultado)
+    }
+    stopCluster(cl)
+  }
+  
+  fallos.sensor = estrict.secuencia(df)
+  posibles.Seq = sequia.secuencia(df)
+  
+  return(list(fallas_sensor = fallos.sensor, posibles_sequias = posibles.Seq))
+  
+  }
+  
 
+################################################################################
+# ------------------------ Ejecución de la función -----------------------------
+data = fread(file.path(directory, "ElLabradoM_min5.csv"))
+
+df = limites.duros(data, "Lluvia_Tot") # Límites duros
+df = data_preprocess(df, "Lluvia_Tot") # Pre procesamiento
+fallas_sequias = posibles.fallas(df) # Posibles fallas
+
+
+
+
+summary(df)
+vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
+vacios
+
+directory.save = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL/Base datos procesada/Precipitación"
+write.csv2(df, file.path(directory.save, "ElLabradoM_min5.csv"), row.names = FALSE)
+data.c = fread(file.path(directory.save, "ElLabradoM_min5.csv"))
+data.t = data.c
+data.c$Lluvia_Tot = as.double(data.c$Lluvia_Tot)
+# Comrobacion final
+pretrat = function(df, variable){
+  df = data.frame(df)
+  df = df[, c("TIMESTAMP", variable)]
+  df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+  df[[variable]] = as.numeric(df[[variable]])
+  df = df[order(df$TIMESTAMP),]
+}
+
+data.2 = pretrat(data, "Lluvia_Tot")
+summary(data.2)
