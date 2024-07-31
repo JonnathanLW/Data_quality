@@ -5,12 +5,9 @@
 # Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad).
 # Se plantea la opción de utilizar paralelización para hacer el procedimiento mas rápido (Testear funcionalidad).
 # Librerías necesarias ---------------------------------------------------------
-library(data.table)
-library(dplyr)
-library(foreach)
-library(doParallel)
-library(svDialogs)
-library(lubridate)
+library(pacman)
+p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate)
+
 ################################################################################
 # Lectura de datos
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
@@ -280,7 +277,7 @@ data_preprocess = function(df, variable){
 
 # Función para ver si hay valores seguidos continuos
 posibles.fallas = function(df) {
-  # Secuencia estricta y Normal --------------------------------------------------
+  # Secuencia estricta y Normal ------------------------------------------------
   tramos.repetidos = function(df, inicio, fin, j) {
     secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
     i = inicio
@@ -428,8 +425,8 @@ posibles.fallas = function(df) {
 
 # agrupamiento horario
 agrupamiento.horario = function(df){
-  umbral.min = 10 # examinar esto
-  umbral.max = 15
+  umbral.min = 10 # % de vacíos continuos  
+  umbral.max = 15 # % de vacíos en no continuos
   
   fecha.minima = min(df$TIMESTAMP)
   fecha.maxima = max(df$TIMESTAMP)
@@ -448,13 +445,36 @@ agrupamiento.horario = function(df){
     num_fechas.horaria = sapply(horas, function(hora) {
       fechas.filtradas = fechas %>%
         filter(fechas >= hora & fechas < hora + hours(1))
-      
       return(nrow(fechas.filtradas))
       
     })
     return(num_fechas.horaria)
   })
   
+  # fechas.2 = data.frame(as.Date(df$TIMESTAMP, format = "%Y-%m-%d"))
+  # fechas.2 = unique(fechas.2)
+  # names(fechas.2) = c("fecha")
+  # 
+  # # Búsqueda de outliers -------------------------------------------------------
+  # outliers.BD = lapply(1:nrow(fechas.2), function(i) {
+  #   Li = as.POSIXct(paste0(fechas.2[i, ], " 00:00:00"), tz = "UTC")
+  #   Ls = as.POSIXct(paste0(fechas.2[i, ], " 23:55:00"), tz = "UTC")
+  #   horas = seq(Li, Ls, by = "hour")
+  #   # Analizo outliers 
+  #   num_fechas.horaria = sapply(horas, function(hora) {
+  #     fechas.filtradas = df %>%
+  #       filter(TIMESTAMP >= Li & TIMESTAMP < Ls)
+  #     Q1 = quantile(fechas.filtradas$Lluvia_Tot, 0.25, na.rm = TRUE)
+  #     Q3 = quantile(fechas.filtradas$Lluvia_Tot, 0.75, na.rm = TRUE)
+  #     IQR <- Q3 - Q1   
+  #     lower_bound <- Q1 - 1.5 * IQR
+  #     upper_bound <- Q3 + 1.5 * IQR
+  #     outliers <- fechas.filtradas$Lluvia_Tot[fechas.filtradas$Lluvia_Tot < lower_bound | fechas.filtradas$Lluvia_Tot > upper_bound]
+  #     return(length(outliers))
+  #   })
+
+  # })
+  # 
   horas.seq = lapply(1:nrow(fechas.1), function(i) {
     Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
     Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
@@ -466,24 +486,24 @@ agrupamiento.horario = function(df){
   Nas = data.frame(fecha = horas.seq$fecha, num.fechas = unlist(resultados))
   names(Nas) = c("fecha", "Na")
   
-  # Error aqui, al hacer secuencia horaria no estoy teniendo que si inicio a las 4:40 la secuencia se hara de esa forma y no de forma correcta
+  # 
   fechas.comparativa = seq(as.POSIXct(fecha.minima), as.POSIXct(fecha.maxima), by = "hour")
   fechas.comparativa = trunc(fechas.comparativa, "hour")
   fechas.comparativa = data.frame(fechas.comparativa)
   names(fechas.comparativa) = c("fecha")
   
-  # posible error aquí 
+  # 
   conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
   conteo = data.frame(conteo)
   conteo$Na[is.na(conteo$Na)] = 0
   conteo$porcentaje = round((conteo$Na / 12) * 100,2)
   names(conteo) = c("fecha", "Na", "% Datos_faltantes")
-  summary.Nas <<- conteo
   
   mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
   
   faltantes = mayor.umbral
   names(faltantes)[1] = "TIMESTAMP"
+  datos.descartados <<- faltantes
   
   df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
     mutate(TIMESTAMP = floor_date(TIMESTAMP, "hour")) %>%
@@ -536,6 +556,32 @@ agrupamiento.horario = function(df){
   return(df)
 }
 
+# Análisis de outliers 
+outliers.analisis = function(df) {
+  fechas = data.frame(as.Date(df$TIMESTAMP, format = "%Y-%m-%d"))
+  fechas = unique(fechas)
+  names(fechas) = c("fecha")
+  
+  # Búsqueda de outliers -------------------------------------------------------
+  outliers.BD = lapply(1:nrow(fechas), function(i) {
+    Li = as.POSIXct(paste0(fechas[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas[i, ], " 23:00:00"), tz = "UTC")
+    horas = seq(Li, Ls, by = "hour")
+    # Analizo outliers
+    num_fechas.horaria = sapply(horas, function(hora) {
+      fechas.filtradas = df %>%
+        filter(TIMESTAMP >= Li & TIMESTAMP <= Ls)
+      
+      Q1 = quantile(fechas.filtradas$Lluvia_Tot, 0.25, na.rm = TRUE)
+      Q3 = quantile(fechas.filtradas$Lluvia_Tot, 0.75, na.rm = TRUE)
+      IQR = Q3 - Q1
+      lower_bound = Q1 - 1.5 * IQR
+      upper_bound = Q3 + 1.5 * IQR
+      outliers = fechas.filtradas$Lluvia_Tot[fechas.filtradas$Lluvia_Tot < lower_bound | fechas.filtradas$Lluvia_Tot > upper_bound]
+      return(length(outliers))
+    })
+  })
+}
 
 ################################################################################
 # ------------------------ Ejecución de la función -----------------------------
@@ -546,8 +592,28 @@ fallas_sequias = posibles.fallas(df) # Posibles fallas
 datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
 ################################################################################
 
+prueba = datos.horarios
+prueba$mes = month(prueba$TIMESTAMP)
+prueba$año = year(prueba$TIMESTAMP)
 
 
+
+# Selecciono solo los datos que van desde octubre a mayo
+df.3 = prueba %>% filter(mes >= 10 | mes <= 5)
+df.3 = prueba %>% filter(mes >= 6 & mes <= 9)
+summary(df.3)
+
+Q1 = quantile(df.3$Lluvia_Tot, 0.25, na.rm = TRUE)
+Q3 = quantile(df.3$Lluvia_Tot, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1   
+
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+outliers <- df.3$Lluvia_Tot[df.3$Lluvia_Tot < lower_bound | df.3$Lluvia_Tot > upper_bound]
+
+boxplot(df.3$Lluvia_Tot, main="Detección de Outliers en Lluvia_Tot usando IQR", ylab="Lluvia_Tot", xlab="Data")
+points(which(df.3$Lluvia_Tot %in% outliers), outliers, col="red", pch=19)
 
 summary(df)
 vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
