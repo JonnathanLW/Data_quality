@@ -13,71 +13,6 @@ p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, gr
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
 ################################################################################
 # ----------------------- Funciones implementadas ------------------------------
-# graficar = function(df, variable, nombre.estat, carpeta_1 = NULL, carpeta_2) {
-#   # Paralelizacion de gráficos (Version Beta 1.0.0)
-#   
-#   if (is.null(carpeta_1)) {
-#     ruta = paste0(directory, "/", carpeta_2)
-#   } else {
-#     ruta = paste0(directory, "/", carpeta_1, "/", carpeta_2)
-#     if (!dir.exists(ruta)) {
-#       dir.create(ruta, recursive = TRUE)
-#     }
-#   }
-#   
-#   
-#   if (variable == "Lluvia_Tot") {
-#     titulo = "Precipitación en el año"
-#     eje_y = "Precipitación (mm)"
-#   } else {
-#     titulo = "Niveles en el año"
-#     eje_y = "Nivel (cm)"
-#   }
-#   
-#   df_graf = df
-#   año = year(df_graf$TIMESTAMP)
-#   año = unique(año)
-#   par(mfrow = c(3, 4))
-#   graficos = list()
-#   for (i in 1:length(año)) {
-#     df.año = df_graf %>% filter(year(TIMESTAMP) == año[i])
-#     # Calcular el inicio y fin de cada mes
-#     # Función para obtener el último día de cada mes
-#     last_day_of_month = function(date) {
-#       ceiling_date(date, "month") - days(1)
-#     }
-#     
-#     # Crear vector de fechas para el primer día de enero y últimos días de los demás meses
-#     month_breaks = c(
-#       as.Date(paste0(año[i], "-01-01")),  # Primer día de enero
-#       sapply(2:12, function(m) last_day_of_month(as.Date(paste0(año[i], "-", m, "-01"))))
-#     )
-#     
-#     # Crear gráfico
-#     p.1 = ggplot(df.año, aes(x = TIMESTAMP, y = !!sym(variable))) +
-#       geom_line(color = "blue") +
-#       labs(title = paste(titulo, año[i]), x = "Fecha", y = eje_y) +
-#       scale_x_datetime(
-#         limits = c(as.POSIXct(paste0(año[i], "-01-01 00:00:00")), 
-#                    as.POSIXct(paste0(año[i], "-12-31 23:59:59"))),
-#         breaks = as.POSIXct(month_breaks),
-#         labels = function(x) format(x, "%b"),
-#         date_minor_breaks = "1 month"
-#       ) +
-#       theme(
-#         plot.title = element_text(hjust = 0.5, face = "bold"),
-#         axis.text.x = element_text(angle = 45, hjust = 1)
-#       )
-#     
-#     graficos[[i]] = p.1
-#   }
-#   
-#   p.f = grid.arrange(grobs = graficos)
-#   ggsave(paste0(ruta, "/", nombre.estat, "_crudo.png"),
-#          plot = p.f, width = 12, height = 8, units = "in", dpi = 300, type = "cairo")
-#   
-#   
-# }
 
 graficar = function(df, variable, nombre.estat, carpeta_1 = NULL, carpeta_2) {
   num_cores = detectCores() - 1  # Usa todos los núcleos menos uno
@@ -157,7 +92,7 @@ save.data = function(df, nombre.estat, carpeta_1 = NULL, carpeta_2){
       dir.create(ruta, recursive = TRUE)
     }
   }
-  write.csv(df, paste0(ruta, nombre.estat, ".csv"), row.names = FALSE)
+  write.csv(df, paste0(ruta, "/", nombre.estat, ".csv"), row.names = FALSE)
 }
 # Función para pre procesamiento de datos 
 data_preprocess = function(df, variable){
@@ -621,28 +556,6 @@ agrupamiento.horario = function(df, variable){
     return(data.frame(fecha = horas))
   }
   
-  
-  # 
-  # resultados = lapply(1:nrow(fechas.1), function(i) {
-  #   Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
-  #   Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
-  #   horas = seq(Li, Ls, by = "hour")
-  #   num_fechas.horaria = sapply(horas, function(hora) {
-  #     fechas.filtradas = fechas %>%
-  #       filter(fechas >= hora & fechas < hora + hours(1))
-  #     return(nrow(fechas.filtradas))
-  #     
-  #   })
-  #   return(num_fechas.horaria)
-  # })
-  # 
-  # horas.seq = lapply(1:nrow(fechas.1), function(i) {
-  #   Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
-  #   Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
-  #   horas = seq(Li, Ls, by = "hour")
-  #   return(horas)
-  # })
-  
  # horas.seq = do.call(rbind, lapply(horas.seq , function(x) data.frame(fecha = x)))
   Nas = data.frame(fecha = horas.seq$fecha, num.fechas = unlist(resultados))
   names(Nas) = c("fecha", "Na")
@@ -699,7 +612,6 @@ agrupamiento.horario = function(df, variable){
   }
   
   # Reporte -----------------------------------------------------------------
-  # nombre.estat = sub("_min5.csv", "", name.estacion)
   faltantes = sum(is.na(df$Lluvia_Tot))
   total = nrow(df)
   
@@ -717,7 +629,7 @@ agrupamiento.horario = function(df, variable){
   # Guardo los datos diarios
   guardar.archivo = save.data(df, nombre.estat, "Datos_horarios", "Datos_process")
   
-  # Grafico la serie temporal
+  # Gráfico la serie temporal
   
   carpeta_1 = "Graph_Agrupamiento_horario"
   carpeta_2 = "Estaciones_hora_process"
@@ -815,7 +727,6 @@ agrupamiento.diario = function(df) {
     guardar.archivo = save.data(df, nombre.estat, "Datos_diarios", "Datos_process")
     
     return(df)
-    
   }
 }
 
@@ -866,9 +777,9 @@ datos.horarios = agrupamiento.horario(fallas_sequias$df, "Lluvia_Tot") # Agrupam
 datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
 ################################################################################
 
-
+# Benchmarking
 resultado_tiempo <- system.time({
   df_resultado <- agrupamiento.horario(df, "Lluvia_Tot")
 })
-
+print(resultado_tiempo)
 
