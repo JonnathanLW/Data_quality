@@ -1,6 +1,6 @@
 ################################################################################
 # Readme:
-# Versión: 2.13.4 (Estable)
+# Versión: 2.13.5 (Estable)
 # Librerías necesarias ---------------------------------------------------------
 library(pacman)
 p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, gridExtra)
