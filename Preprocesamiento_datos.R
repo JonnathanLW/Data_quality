@@ -1,19 +1,30 @@
 ################################################################################
-# Readme -----------------------------------------------------------------------
-######### Reportes de la versión 
-# Versión: 2.0.0
-# Se esta implementando la función para los datos que no están en intervalos de 5 minutos (Testear funcionalidad).
-# Se plantea la opción de utilizar paralelización para hacer el procedimiento mas rápido (Testear funcionalidad).
 # Librerías necesarias ---------------------------------------------------------
 library(pacman)
 p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, gridExtra)
 
 ################################################################################
-# Lectura de datos
+# directorio raíz. 
 directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
 ################################################################################
 # ----------------------- Funciones implementadas ------------------------------
-
+# Funciones complementarias ----------------------------------------------------
+leer.datos = function() {
+  estacion = paste0(nombre.estat, ".csv")
+  df = fread(file.path(directory, estacion))
+  df = data.frame(df)
+  df = df[, c("TIMESTAMP", variable)]
+  
+  if (!is.numeric(df[1,2])){
+    df = df[-1,]
+  }
+  
+  df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+  df[[variable]] = as.numeric(df[[variable]])
+  df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
+  df = df[order(df$TIMESTAMP),]
+  return(df)
+}
 graficar = function(df, variable, nombre.estat, carpeta_1 = NULL, carpeta_2) {
   num_cores = detectCores() - 1  # Usa todos los núcleos menos uno
   cl = makeCluster(num_cores)
@@ -82,7 +93,6 @@ graficar = function(df, variable, nombre.estat, carpeta_1 = NULL, carpeta_2) {
   
   stopCluster(cl)
 }
-
 save.data = function(df, nombre.estat, carpeta_1 = NULL, carpeta_2){
   if (is.null(carpeta_1)) {
     ruta = paste0(directory, "/", carpeta_2)
@@ -94,21 +104,16 @@ save.data = function(df, nombre.estat, carpeta_1 = NULL, carpeta_2){
   }
   write.csv(df, paste0(ruta, "/", nombre.estat, ".csv"), row.names = FALSE)
 }
+# ------------------------------------------------------------------------------
+# Funciones principales --------------------------------------------------------
 # Función para pre procesamiento de datos 
-data_preprocess = function(df, variable){
-  # Lectura y conversión de datos a formato correcto ---------------------------
-  df = data.frame(df)
-  df = df[, c("TIMESTAMP", variable)]
-  df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
-  df[[variable]] = as.numeric(df[[variable]])
-  df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
-  df = df[order(df$TIMESTAMP),]
-  
+data_preprocess = function(df){
   # Identificación y eliminación de fechas repetidas ---------------------------
   ind.duplicated = which(duplicated(df$TIMESTAMP) | duplicated(df$TIMESTAMP, fromLast = TRUE))
   if (length(ind.duplicated) > 0) {
     dlg_message("Se encontraron duplicados en la base de datos, se procederá a eliminarlos. (Verifique los datos duplicados en la variable 'datos.duplicados')")
     datos.duplicados = df[ind.duplicated,]
+    datos.duplicados = datos.duplicados[order(datos.duplicados$TIMESTAMP),]
     datos.duplicados <<- datos.duplicados
     df = df[!duplicated(df[c("TIMESTAMP", variable)]),]
   } else {
@@ -125,7 +130,7 @@ data_preprocess = function(df, variable){
   if (any(!verificacion == TRUE)) {
     dlg_message("Se encontraron datos que no cumplen con el intervalo de 5 minutos, se procederá a tratarlos.")
     
-    # Algoritmo en fase Beta --------------------------------------------------
+    # Algoritmo en paralelo
     # Configuro la paralelizacion
     # 1. Configurar el clúster para procesamiento paralelo
     cl = makeCluster(detectCores())
@@ -135,6 +140,8 @@ data_preprocess = function(df, variable){
     # 1.1 Optimizo el código: Selecciono años donde tengo problemas
     df.problemas = df %>%
       filter(minute(TIMESTAMP) %% 5 != 0 | second(TIMESTAMP) != 0)
+    
+    datos.erroneos <<-- df.problemas
     
     # 2. Algoritmo a paralelizar
     rango.fechas = seq(floor_date(min(df.problemas$TIMESTAMP), "5 mins"), 
@@ -148,15 +155,19 @@ data_preprocess = function(df, variable){
       ventana.inicio = hora.objetivo - minutes(1)
       ventana.fin = hora.objetivo
       
-      dato.cercano = df %>% 
-        filter(TIMESTAMP > ventana.inicio, TIMESTAMP <= ventana.fin) %>% 
-        arrange(desc(TIMESTAMP)) %>%
-        slice(1)
-      
-      if (nrow(dato.cercano) == 0) {
-        return(NA)
+      if (!any(df$TIMESTAMP == ventana.fin)) {
+        dato.cercano = df %>% 
+          filter(TIMESTAMP > ventana.inicio, TIMESTAMP <= ventana.fin) %>% 
+          arrange(desc(TIMESTAMP)) %>%
+          slice(1)
+        
+        if (nrow(dato.cercano) == 0) {
+          return(NA)
+        } else {
+          return(dato.cercano[[variable]])
+        }
       } else {
-        return(dato.cercano[[variable]])
+        return(df[df$TIMESTAMP == ventana.fin, variable])
       }
     }
     
@@ -183,16 +194,17 @@ data_preprocess = function(df, variable){
     duplicados.error = df.final[ind.duplicated_prob,]
     
     # Versión beta para conservar valores en ventanas de 20 min en pasado y + 15 en el futuro.
-    resolver_duplicados =function(df.final, indice, ventana_antes = 20, ventana_despues = 15) {
-      timestamp_actual =df.final$TIMESTAMP[indice]
-      ventana_inicio =timestamp_actual - minutes(ventana_antes)
-      ventana_fin =timestamp_actual + minutes(ventana_despues)
+    resolver_duplicados = function(df.final, indice, ventana_antes = 20, ventana_despues = 15) {
+      timestamp_actual = df.final$TIMESTAMP[indice]
+      ventana_inicio = timestamp_actual - minutes(ventana_antes)
+      ventana_fin = timestamp_actual + minutes(ventana_despues)
       
-      valores_cercanos =df.final[[variable]][df.final$TIMESTAMP >= ventana_inicio & 
+      
+      valores_cercanos = df.final[[variable]][df.final$TIMESTAMP >= ventana_inicio & 
                                                df.final$TIMESTAMP <= ventana_fin & 
                                                df.final$TIMESTAMP != timestamp_actual]
       
-      filas_actuales =which(df.final$TIMESTAMP == timestamp_actual)
+      filas_actuales = which(df.final$TIMESTAMP == timestamp_actual)
       valores_actuales =df.final[[variable]][filas_actuales]
       
       # Encontrar el valor más frecuente en los valores cercanos y actuales
@@ -200,7 +212,7 @@ data_preprocess = function(df, variable){
       valor_a_mantener =as.numeric(names(which.max(table(todos_valores))))
       
       # Identificar las filas que no coinciden con el valor a mantener
-      filas_a_na =filas_actuales[df.final[[variable]][filas_actuales] != valor_a_mantener]
+      filas_a_na = filas_actuales[df.final[[variable]][filas_actuales] != valor_a_mantener]
       
       return(list(valor = valor_a_mantener, filas_na = filas_a_na))
     }
@@ -223,13 +235,13 @@ data_preprocess = function(df, variable){
       
       # Establecer NA para las filas que deben ser reemplazadas
       if (length(resultado$filas_na) > 0) {
-        df_limpio$TIMESTAMP[resultado$filas_na] =NA
-        df_limpio[[variable]][resultado$filas_na] =NA
+        df_limpio$TIMESTAMP[resultado$filas_na] = NA
+        df_limpio[[variable]][resultado$filas_na] = NA
       }
     }
     
     # Elimino las filas con NA de TIMESTAMP
-    df_limpio =df_limpio[!is.na(df_limpio$TIMESTAMP),]
+    df_limpio = df_limpio[!is.na(df_limpio$TIMESTAMP),]
     
     # Se une directamente los datos
     min.date = min(df$TIMESTAMP)
@@ -297,6 +309,19 @@ limites.duros = function(df, variable) {
     Limite.superior = df[ind.Ls,]
     Limite.superior <<- Limite.superior
     
+    pretrat = function(df) {
+      df = data.frame(df)
+      df = df[, c("TIMESTAMP", variable)]
+      
+      if (!is.numeric(df[1,2])){
+        df = df[-1,]
+      }
+      
+      df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+      df[[variable]] = as.numeric(df[[variable]])
+      df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
+      df = df[order(df$TIMESTAMP),]
+    }
     # Lógica para tratar los datos
     # Se va a verificar 3 estaciones cercanas para corroborar información 
     dlg_message("A continuación seleccione las tres estaciones mas cercanas. ")
@@ -363,33 +388,51 @@ limites.duros = function(df, variable) {
 # Función para ver si hay valores seguidos continuos
 posibles.fallas = function(df, variable) {
   # Secuencia estricta y Normal ------------------------------------------------
-  tramos.repetidos = function(df, inicio, fin, j) {
+  tramos.repetidos = function(df, inicio, fin, j, intervalo) {
     secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
     i = inicio
     while (i <= fin - j + 1) {
-      secuencia = df$Lluvia_Tot[i:(i+j-1)]
+      secuencia = df$Lluvia_Tot[i:(i + j - 1)]
+      
       if (length(unique(secuencia)) == 1 && unique(secuencia) != 0 && !is.na(unique(secuencia))) {
         valor_repetido = unique(secuencia)
         k = j
+        
         while (i + k <= fin && df$Lluvia_Tot[i + k] == valor_repetido) {
           k = k + 1
         }
+        
         secuencias = rbind(secuencias, 
-                           data.frame(inicio = i, 
-                                      fin = i + k - 1, 
-                                      valor = valor_repetido))
+                            data.frame(inicio = i, 
+                                       fin = i + k - 1, 
+                                       valor = valor_repetido))
+        
+        # Buscar apariciones adicionales en el intervalo de tiempo posterior
+        tiempo_final = as.POSIXct(df$TIMESTAMP[i + k - 1]) + intervalo
+        
+        while (i + k <= fin && as.POSIXct(df$TIMESTAMP[i + k]) <= tiempo_final) {
+          if (df$Lluvia_Tot[i + k] == valor_repetido) {
+            k = k + 1
+            secuencias$fin[nrow(secuencias)] = i + k - 1
+            tiempo_final = as.POSIXct(df$TIMESTAMP[i + k - 1]) + intervalo
+          } else {
+            k = k + 1
+          }
+        }
+        
         i = i + k  # Saltar a la siguiente secuencia potencial
       } else {
         i = i + 1
       }
     }
+    
     return(secuencias)
   }
   
   tramos.repetidos <<- tramos.repetidos
   
   estrict.secuencia = function(df) {
-    j = 288
+    j = 288  # 24 horas
     j <<- j
     # Configuro la paralelización
     num_cores = detectCores() - 1  # Usar todos los cores menos uno
@@ -406,66 +449,7 @@ posibles.fallas = function(df, variable) {
     
     # Aplicar la función en paralelo
     resultados = parLapply(cl, rangos, function(rango) {
-      tramos.repetidos(df, rango[1], rango[2], j)
-    })
-    
-    stopCluster(cl)
-    # Combinar los resultados
-    secuencias_detectadas = do.call(rbind, resultados)
-    
-    # Crear el dataframe final con las fechas
-    if (nrow(secuencias_detectadas) > 0) {
-      resultado = secuencias_detectadas %>%
-        mutate(fecha_inicio = df$TIMESTAMP[inicio],
-               fecha_fin = df$TIMESTAMP[fin]) %>%
-        select(fecha_inicio, fecha_fin, valor)
-    } else {
-      resultado = NULL
-    }
-    
-    if (!is.null(resultado)) {
-      return(resultado)
-    }
-  }
-  
-  tramos.repetidosSeq = function(df, inicio, fin, j) {
-    secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
-    i = inicio
-    while (i <= fin - j + 1) {
-      secuencia = df$Lluvia_Tot[i:(i+j-1)]
-      if (length(unique(secuencia)) == 1 && unique(secuencia) == 0 && !is.na(unique(secuencia))) {
-        secuencias = rbind(secuencias, 
-                           data.frame(inicio = i, 
-                                      fin = i + j - 1, 
-                                      valor = secuencia[1]))
-        i = i + j  # Saltar a la siguiente secuencia potencial
-      } else {
-        i = i + 1
-      }
-    }
-    return(secuencias)
-  }
-  
-  tramos.repetidosSeq <<- tramos.repetidosSeq
-  sequia.secuencia = function(df) {
-    j = 288
-    j <<- j
-    # Configuro la paralelización
-    num_cores = detectCores() - 1  # Usar todos los cores menos uno
-    cl = makeCluster(num_cores)
-    registerDoParallel(cl)
-    
-    clusterExport(cl, c("tramos.repetidosSeq", "df", "j"))
-    # Cargar dplyr en cada nodo
-    clusterEvalQ(cl, library(dplyr))
-    # Dividir el rango de índices entre los cores
-    n = nrow(df)
-    chunk_size = ceiling(n / num_cores)
-    rangos = lapply(seq(1, n, by = chunk_size), function(x) c(x, min(x + chunk_size - 1, n)))
-    
-    # Aplicar la función en paralelo
-    resultados = parLapply(cl, rangos, function(rango) {
-      tramos.repetidosSeq(df, rango[1], rango[2], j)
+      tramos.repetidos(df, rango[1], rango[2], j, 20 * 60) #establezo ventana de 20 minutos adicionales. 
     })
     
     stopCluster(cl)
@@ -488,7 +472,6 @@ posibles.fallas = function(df, variable) {
   }
   
   fallos.sensor = estrict.secuencia(df)
-  posibles.Seq = sequia.secuencia(df)
   
   # Lógica para visualizar valores antes de eliminarlos 
   if (!is.null(fallos.sensor)){
@@ -507,13 +490,7 @@ posibles.fallas = function(df, variable) {
   } else {
     dlg_message("No se encontraron posibles fallas en el sensor")
   }
-  
-  # Lógica para verificar asegurarse que sean sequías
-  if (!is.null(posibles.Seq)){
-    msj_seq = dlg_message("Se encontraron tramos temporales repetidos (Posibles sequias).")$res
-    View(posibles.Seq)
-  }
-  return(list(fallas_sensor = fallos.sensor, posibles_sequias = posibles.Seq, df = df))
+  return(list(fallas_sensor = fallos.sensor, df = df))
 }
 
 # agrupamiento horario
@@ -583,7 +560,7 @@ agrupamiento.horario = function(df, variable){
     mutate(TIMESTAMP = floor_date(TIMESTAMP, "hour")) %>%
     anti_join(faltantes, by = "TIMESTAMP") %>%
     group_by(TIMESTAMP) %>%
-    summarise(Lluvia_Tot = sum(Lluvia_Tot, na.rm = TRUE))
+    summarise(!!variable := sum(!!sym(variable), na.rm = TRUE))
   
   fechas.completas = fechas.comparativa
   names(fechas.completas) = c("TIMESTAMP")
@@ -592,7 +569,7 @@ agrupamiento.horario = function(df, variable){
   
   stopCluster(cl)
   
-  # En pruebas --------------------------------------------------------------
+  # En Desarrollo --------------------------------------------------------------
   # Descripción: Incorporar gráfico para ver la distribución de los datos que no fueron agrupados
   # de manera horaria, verificar como están distribuios y considerar agruparlos si el umbral 
   # es mayor al 15 %
@@ -616,6 +593,7 @@ agrupamiento.horario = function(df, variable){
   total = nrow(df)
   
   reporte.horario = data.frame(
+    Estacion = nombre.estat,
     periodo_estudio = paste(fecha.minima, "al", fecha.maxima),
     Numero_años = as.numeric(year(fecha.maxima) - year(fecha.minima)),
     Datos_registrados = total,
@@ -623,6 +601,7 @@ agrupamiento.horario = function(df, variable){
     porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
     porcentaje_ausentes = round((faltantes / total) * 100,2)
   )  
+  
   reporte.horario <<- reporte.horario
   dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.horario' ")
   
@@ -637,7 +616,8 @@ agrupamiento.horario = function(df, variable){
   return(df)
 }
 
-agrupamiento.diario = function(df) {
+# agrupamiento diario
+agrupamiento.diario = function(df, variable) {
   datos.faltantes.diario = function(df) {
     fecha.minima = min(df$TIMESTAMP)
     fecha.maxima = max(df$TIMESTAMP)
@@ -688,8 +668,6 @@ agrupamiento.diario = function(df) {
     # construcción de tabla de reporte
     fecha.i = as.Date(fecha.minima)
     fecha.f = as.Date(fecha.maxima)
-    # nombre.estat = sub("_min5.csv", "", name.estacion)
-    # nombre.estat = sub("Datos_horarios/", "", nombre.estat)
     
     reporte = data.frame(
       Estacion = nombre.estat,
@@ -700,7 +678,6 @@ agrupamiento.diario = function(df) {
       porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
       porcentaje_ausentes = round((faltantes / total) * 100,2)
     )
-    
     
     reporte.diario <<- reporte
     dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.diario' ")
@@ -714,7 +691,7 @@ agrupamiento.diario = function(df) {
       mutate(TIMESTAMP = floor_date(TIMESTAMP, "day")) %>%
       anti_join(faltantes, by = "TIMESTAMP") %>%
       group_by(TIMESTAMP) %>%
-      summarise(prec = sum(prec, na.rm = TRUE))
+      summarise(!!variable := sum(!!sym(variable), na.rm = TRUE))
     
     fechas.completas = fechas.comparativa
     names(fechas.completas) = c("TIMESTAMP")
@@ -730,42 +707,16 @@ agrupamiento.diario = function(df) {
   }
 }
 
-# Análisis de outliers 
-outliers.analisis = function(df) {
-  fechas = data.frame(as.Date(df$TIMESTAMP, format = "%Y-%m-%d"))
-  fechas = unique(fechas)
-  names(fechas) = c("fecha")
-  
-  # Búsqueda de outliers -------------------------------------------------------
-  outliers.BD = lapply(1:nrow(fechas), function(i) {
-    Li = as.POSIXct(paste0(fechas[i, ], " 00:00:00"), tz = "UTC")
-    Ls = as.POSIXct(paste0(fechas[i, ], " 23:00:00"), tz = "UTC")
-    horas = seq(Li, Ls, by = "hour")
-    # Analizo outliers
-    num_fechas.horaria = sapply(horas, function(hora) {
-      fechas.filtradas = df %>%
-        filter(TIMESTAMP >= Li & TIMESTAMP <= Ls)
-      
-      Q1 = quantile(fechas.filtradas$Lluvia_Tot, 0.25, na.rm = TRUE)
-      Q3 = quantile(fechas.filtradas$Lluvia_Tot, 0.75, na.rm = TRUE)
-      IQR = Q3 - Q1
-      lower_bound = Q1 - 1.5 * IQR
-      upper_bound = Q3 + 1.5 * IQR
-      outliers = fechas.filtradas$Lluvia_Tot[fechas.filtradas$Lluvia_Tot < lower_bound | fechas.filtradas$Lluvia_Tot > upper_bound]
-      return(length(outliers))
-    })
-  })
-}
-
-# Análisis posibles sequías 
-
+# ------------------------------------------------------------------------------
 
 ################################################################################
 # ------------------------ Ejecución de la función -----------------------------
-data = fread(file.path(directory, "JimaM_min5.csv"))
-#data = data[-1,]
-nombre.estat = "JimaM_min5"
-df = data_preprocess(data, "Lluvia_Tot") # Pre procesamiento
+# Campos necesarios para la ejecución de la función
+variable = "Lluvia_Tot" # Variable a analizar
+nombre.estat = "ChanludM_min5" # Nombre de la estación
+#--------------------- Ejecución del pre procesamiento --------------------------
+df = leer.datos() # Leer datos
+df = data_preprocess(data) # Pre procesamiento
 df = limites.duros(df, "Lluvia_Tot") # Límites duros
 
 summary(df)
@@ -777,9 +728,33 @@ datos.horarios = agrupamiento.horario(fallas_sequias$df, "Lluvia_Tot") # Agrupam
 datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
 ################################################################################
 
-# Benchmarking
-resultado_tiempo <- system.time({
-  df_resultado <- agrupamiento.horario(df, "Lluvia_Tot")
-})
-print(resultado_tiempo)
+library(isotree)
+data = df
+data$TIMESTAMP <- as.POSIXct(data$TIMESTAMP, format="%Y-%m-%d %H:%M:%S")
+data$minutes = as.numeric(format(data$TIMESTAMP, "%M"))
+data$hour <- as.numeric(format(data$TIMESTAMP, "%H"))
+data$day = as.numeric(format(data$TIMESTAMP, "%d"))
+data$day_of_week <- as.numeric(format(data$TIMESTAMP, "%u"))
 
+# Seleccionamos solo las columnas numéricas relevantes
+data_numeric <- data %>% select(-c("TIMESTAMP"))
+
+# Entrenar el modelo
+model <- isolation.forest(data_numeric, ntrees=500, sample_size=256, prob_pick_pooled_gain=0.1, prob_pick_avg_gain=0.1)
+# Obtener puntuaciones de anomalía
+anomaly_scores <- predict(model, data_numeric, type="score")
+
+# Determinar umbral para clasificar anomalías
+threshold <- quantile(anomaly_scores, 0.99)  # Ajusta el umbral según sea necesario
+data$anomaly <- anomaly_scores > threshold
+# Resumen de resultados
+summary(data$anomaly)
+
+# Visualización de anomalías
+library(ggplot2)
+ggplot(data, aes(x=TIMESTAMP, y=Lluvia_Tot, color=anomaly)) +
+  geom_point() +
+  labs(title="Detección de Anomalías en Datos de Lluvia",
+       x="Timestamp",
+       y="Lluvia Total",
+       color="Anomalía")
