@@ -1,6 +1,6 @@
 ################################################################################
 # Readme:
-# Versión: 2.13.1 (Estable)
+# Versión: 2.13.2 (Estable)
 # Librerías necesarias ---------------------------------------------------------
 library(pacman)
 p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, gridExtra)
@@ -20,7 +20,6 @@ leer.datos = function() {
   if (!is.numeric(df[1,2])){
     df = df[-1,]
   }
-  
   df$TIMESTAMP = as.POSIXct(df$TIMESTAMP, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
   df[[variable]] = as.numeric(df[[variable]])
   df = df[!is.na(df$TIMESTAMP),] # verificar esta linea en especifico. 
@@ -281,7 +280,7 @@ data_preprocess = function(df){
 }
 
 # Función para los limites duros de la base de datos
-limites.duros = function(df, variable) {
+limites.duros = function(df) {
   
   # Creo carpeta para guardar los gráficos -------------------------------------
   carpeta_1 = "Graph_LimitesDuros"
@@ -388,7 +387,7 @@ limites.duros = function(df, variable) {
 }
 
 # Función para ver si hay valores seguidos continuos
-posibles.fallas = function(df, variable) {
+posibles.fallas = function(df) {
   # Secuencia estricta y Normal ------------------------------------------------
   tramos.repetidos = function(df, inicio, fin, j, intervalo) {
     secuencias = data.frame(inicio = integer(), fin = integer(), valor = numeric())
@@ -496,7 +495,7 @@ posibles.fallas = function(df, variable) {
 }
 
 # agrupamiento horario
-agrupamiento.horario = function(df, variable){
+agrupamiento.horario = function(df){
   
   num_cores = detectCores() - 1  # Usa todos los núcleos menos uno
   cl = makeCluster(num_cores)
@@ -619,94 +618,91 @@ agrupamiento.horario = function(df, variable){
 }
 
 # agrupamiento diario
-agrupamiento.diario = function(df, variable) {
-  datos.faltantes.diario = function(df) {
-    fecha.minima = min(df$TIMESTAMP)
-    fecha.maxima = max(df$TIMESTAMP)
+agrupamiento.diario = function(df) {
+  fecha.minima = min(df$TIMESTAMP)
+  fecha.maxima = max(df$TIMESTAMP)
+  
+  umbral.min = 10 
+  umbral.max = 15
+  
+  indices = which(is.na(df$Lluvia_Tot))
+  fechas = df$TIMESTAMP[indices]
+  fechas = data.frame(fechas)
+  
+  fechas.1 = as.Date(fechas$fechas, format = "%Y-%m-%d")
+  fechas.1 = unique(fechas.1)
+  fechas.1 = data.frame(fechas.1)
+  
+  resultados = lapply(1:nrow(fechas.1), function(i) {
+    Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
+    Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
     
-    umbral.min = 10 
-    umbral.max = 15
+    fechas.filtradas = fechas %>%
+      filter(fechas >= Li & fechas <= Ls)
+    # Contar el número de fechas filtradas
+    num.fechas = nrow(fechas.filtradas)
     
-    indices = which(is.na(df$prec))
-    fechas = df$TIMESTAMP[indices]
-    fechas = data.frame(fechas)
-    
-    fechas.1 = as.Date(fechas$fechas, format = "%Y-%m-%d")
-    fechas.1 = unique(fechas.1)
-    fechas.1 = data.frame(fechas.1)
-    
-    resultados = lapply(1:nrow(fechas.1), function(i) {
-      Li = as.POSIXct(paste0(fechas.1[i, ], " 00:00:00"), tz = "UTC")
-      Ls = as.POSIXct(paste0(fechas.1[i, ], " 23:55:00"), tz = "UTC")
-      
-      fechas.filtradas = fechas %>%
-        filter(fechas >= Li & fechas <= Ls)
-      # Contar el número de fechas filtradas
-      num.fechas = nrow(fechas.filtradas)
-      
-      return(num.fechas)
-    })
-    
-    
-    Nas = data.frame(fecha = fechas.1$fechas.1, num.fechas = unlist(resultados))
-    names(Nas) = c("fecha", "Na")
-    
-    fechas.comparativa = seq(as.Date(fecha.minima), as.Date(fecha.maxima), by = "1 day")
-    fechas.comparativa = data.frame(fechas.comparativa)
-    names(fechas.comparativa) = c("fecha")
-    
-    conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
-    conteo = data.frame(conteo)
-    conteo$Na[is.na(conteo$Na)] = 0
-    conteo$porcentaje = round((conteo$Na / 24) * 100,1)
-    names(conteo) = c("fecha", "Na", "% Datos_faltantes")
-    
-    
-    mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
-    faltantes = nrow(mayor.umbral)
-    total = nrow(conteo)
-    
-    datos.NoAgrupadosDiarios <<- mayor.umbral
-    # construcción de tabla de reporte
-    fecha.i = as.Date(fecha.minima)
-    fecha.f = as.Date(fecha.maxima)
-    
-    reporte = data.frame(
-      Estacion = nombre.estat,
-      periodo_estudio = paste(fecha.i, "al", fecha.f),
-      Numero_años = as.numeric(year(fecha.f) - year(fecha.i)),
-      Datos_registrados = total,
-      Datos_ausentes = faltantes,
-      porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
-      porcentaje_ausentes = round((faltantes / total) * 100,2)
-    )
-    
-    reporte.diario <<- reporte
-    dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.diario' ")
-    
-    # Agrupación de datos de forma diaria --------------------------------------
-    
-    faltantes = mayor.umbral
-    names(faltantes)[1] = "TIMESTAMP"
-    
-    df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
-      mutate(TIMESTAMP = floor_date(TIMESTAMP, "day")) %>%
-      anti_join(faltantes, by = "TIMESTAMP") %>%
-      group_by(TIMESTAMP) %>%
-      summarise(!!variable := sum(!!sym(variable), na.rm = TRUE))
-    
-    fechas.completas = fechas.comparativa
-    names(fechas.completas) = c("TIMESTAMP")
-    
-    df = left_join(fechas.completas, df.1, by = "TIMESTAMP") %>%
-      distinct() %>%
-      arrange(TIMESTAMP)
-    
-    # Guardo los datos diarios
-    guardar.archivo = save.data(df, nombre.estat, "Datos_diarios", "Datos_process")
-    
-    return(df)
-  }
+    return(num.fechas)
+  })
+  
+  
+  Nas = data.frame(fecha = fechas.1$fechas.1, num.fechas = unlist(resultados))
+  names(Nas) = c("fecha", "Na")
+  
+  fechas.comparativa = seq(as.Date(fecha.minima), as.Date(fecha.maxima), by = "1 day")
+  fechas.comparativa = data.frame(fechas.comparativa)
+  names(fechas.comparativa) = c("fecha")
+  
+  conteo = merge(fechas.comparativa, Nas, by = "fecha", all = TRUE)
+  conteo = data.frame(conteo)
+  conteo$Na[is.na(conteo$Na)] = 0
+  conteo$porcentaje = round((conteo$Na / 24) * 100,1)
+  names(conteo) = c("fecha", "Na", "% Datos_faltantes")
+  
+  
+  mayor.umbral = conteo %>% filter(conteo$`% Datos_faltantes` > umbral.min)
+  faltantes = nrow(mayor.umbral)
+  total = nrow(conteo)
+  
+  datos.NoAgrupadosDiarios <<- mayor.umbral
+  # construcción de tabla de reporte
+  fecha.i = as.Date(fecha.minima)
+  fecha.f = as.Date(fecha.maxima)
+  
+  reporte = data.frame(
+    Estacion = nombre.estat,
+    periodo_estudio = paste(fecha.i, "al", fecha.f),
+    Numero_años = as.numeric(year(fecha.f) - year(fecha.i)),
+    Datos_registrados = total,
+    Datos_ausentes = faltantes,
+    porcentaje_completos = round(100 - ((faltantes / total) * 100),2),
+    porcentaje_ausentes = round((faltantes / total) * 100,2)
+  )
+  
+  reporte.diario <<- reporte
+  dlg_message("Se ha generado un reporte de datos faltantes. Verificar el objeto 'reporte.diario' ")
+  
+  # Agrupación de datos de forma diaria --------------------------------------
+  
+  faltantes = mayor.umbral
+  names(faltantes)[1] = "TIMESTAMP"
+  
+  df.1 = df %>% mutate(TIMESTAMP = as.POSIXct(TIMESTAMP)) %>%
+    mutate(TIMESTAMP = floor_date(TIMESTAMP, "day")) %>%
+    anti_join(faltantes, by = "TIMESTAMP") %>%
+    group_by(TIMESTAMP) %>%
+    summarise(!!variable := sum(!!sym(variable), na.rm = TRUE))
+  
+  fechas.completas = fechas.comparativa
+  names(fechas.completas) = c("TIMESTAMP")
+  
+  df = left_join(fechas.completas, df.1, by = "TIMESTAMP") %>%
+    distinct() %>%
+    arrange(TIMESTAMP)
+  
+  # Guardo los datos diarios
+  guardar.archivo = save.data(df, nombre.estat, "Datos_diarios", "Datos_process")
+  return(df)
 }
 
 # ------------------------------------------------------------------------------
@@ -715,48 +711,17 @@ agrupamiento.diario = function(df, variable) {
 # ------------------------ Ejecución de la función -----------------------------
 # Campos necesarios para la ejecución de la función
 variable = "Lluvia_Tot" # Variable a analizar
-nombre.estat = "ChanludM_min5" # Nombre de la estación
+nombre.estat = "MamamagM_min5" # Nombre de la estación
 #--------------------- Ejecución del pre procesamiento --------------------------
 df = leer.datos() # Leer datos
-df = data_preprocess(data) # Pre procesamiento
-df = limites.duros(df, "Lluvia_Tot") # Límites duros
+df = data_preprocess(df) # Pre procesamiento
+df = limites.duros(df) # Límites duros
 
 summary(df)
 vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
 vacios
 
 fallas_sequias = posibles.fallas(df) # Posibles fallas
-datos.horarios = agrupamiento.horario(fallas_sequias$df, "Lluvia_Tot") # Agrupamiento horario
+datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
 datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
 ################################################################################
-
-library(isotree)
-data = df
-data$TIMESTAMP <- as.POSIXct(data$TIMESTAMP, format="%Y-%m-%d %H:%M:%S")
-data$minutes = as.numeric(format(data$TIMESTAMP, "%M"))
-data$hour <- as.numeric(format(data$TIMESTAMP, "%H"))
-data$day = as.numeric(format(data$TIMESTAMP, "%d"))
-data$day_of_week <- as.numeric(format(data$TIMESTAMP, "%u"))
-
-# Seleccionamos solo las columnas numéricas relevantes
-data_numeric <- data %>% select(-c("TIMESTAMP"))
-
-# Entrenar el modelo
-model <- isolation.forest(data_numeric, ntrees=500, sample_size=256, prob_pick_pooled_gain=0.1, prob_pick_avg_gain=0.1)
-# Obtener puntuaciones de anomalía
-anomaly_scores <- predict(model, data_numeric, type="score")
-
-# Determinar umbral para clasificar anomalías
-threshold <- quantile(anomaly_scores, 0.99)  # Ajusta el umbral según sea necesario
-data$anomaly <- anomaly_scores > threshold
-# Resumen de resultados
-summary(data$anomaly)
-
-# Visualización de anomalías
-library(ggplot2)
-ggplot(data, aes(x=TIMESTAMP, y=Lluvia_Tot, color=anomaly)) +
-  geom_point() +
-  labs(title="Detección de Anomalías en Datos de Lluvia",
-       x="Timestamp",
-       y="Lluvia Total",
-       color="Anomalía")
