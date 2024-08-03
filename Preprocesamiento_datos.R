@@ -1,13 +1,14 @@
 ################################################################################
 # Readme:
-# Versión: 2.13.5 (Estable)
+# Versión: 2.15.8 (Beta)
 # Librerías necesarias ---------------------------------------------------------
 library(pacman)
-p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, gridExtra)
+p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, 
+       gridExtra, zoo, sp, spdep)
 
 ################################################################################
 # directorio raíz. 
-directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL"
+directory = "C:/Users/Jonna/Desktop/Proyecto_U/Base de Datos/DATOS_ESTACIONES_FALTANTES_24JUL/Análisis de sequias"
 ################################################################################
 # ----------------------- Funciones implementadas ------------------------------
 # Funciones complementarias ----------------------------------------------------
@@ -108,7 +109,7 @@ save.data = function(df, nombre.estat, carpeta_1 = NULL, carpeta_2){
 # ------------------------------------------------------------------------------
 # Funciones principales --------------------------------------------------------
 # Función para pre procesamiento de datos 
-data_preprocess = function(df){
+data_preprocess = function(df,variable){
   # Identificación y eliminación de fechas repetidas ---------------------------
   ind.duplicated = which(duplicated(df$TIMESTAMP) | duplicated(df$TIMESTAMP, fromLast = TRUE))
   if (length(ind.duplicated) > 0) {
@@ -125,7 +126,6 @@ data_preprocess = function(df){
   intervalo_5min = function(timestamp) {
     minute(timestamp) %% 5 == 0 & second(timestamp) == 0
   }
-  
   verificacion = intervalo_5min(df$TIMESTAMP)
   
   if (any(!verificacion == TRUE)) {
@@ -142,7 +142,7 @@ data_preprocess = function(df){
     df.problemas = df %>%
       filter(minute(TIMESTAMP) %% 5 != 0 | second(TIMESTAMP) != 0)
     
-    datos.erroneos <<-- df.problemas
+    datos.erroneos <<- df.problemas
     
     # 2. Algoritmo a paralelizar
     rango.fechas = seq(floor_date(min(df.problemas$TIMESTAMP), "5 mins"), 
@@ -183,6 +183,7 @@ data_preprocess = function(df){
         filter(!is.na(!!sym(variable)))  
     }
     
+    stopCluster(cl)
     # 6. Combino los resultados
     df.final = bind_rows(result_list)
     
@@ -221,9 +222,16 @@ data_preprocess = function(df){
     # Crear una copia del dataframe original
     df_limpio = df.final
     
+    # Inicio la paralelizacion 
+    cl = makeCluster(detectCores())
+    num_cores = length(cl) - 1 # Se usa el numero total de cores menos 1
+    registerDoParallel(num_cores)
+    
     resultados = foreach(i = ind.duplicated_prob, .packages = c("lubridate")) %dopar% {
       resolver_duplicados(df_limpio, i)
     }
+    
+    stopCluster(cl)
     
     for (i in seq_along(ind.duplicated_prob)) {
       indice = ind.duplicated_prob[i]
@@ -255,18 +263,20 @@ data_preprocess = function(df){
       stop("Error en la secuencia de datos")
     } 
     
-    # 5. Detener el clúster
-    stopCluster(cl)
-    
     # -------------------------------------------------------------------------
     
   } else {
     dlg_message("Todos los datos cumplen con el intervalo de 5 minutos.")
     # Se une directamente los datos
+    df.final = df %>%
+      group_by(TIMESTAMP) %>%
+      summarise(across(all_of(variable), 
+                       ~ifelse(all(is.na(.x)), NA, first(na.omit(.x)))))
+    
     min.date = min(df$TIMESTAMP)
     max.date = max(df$TIMESTAMP)
     TIMESTAMP = seq.POSIXt(min.date, max.date, by = "5 min")
-    df.final = merge(data.frame(TIMESTAMP = TIMESTAMP), df, by = "TIMESTAMP", all = TRUE)
+    df.final = merge(data.frame(TIMESTAMP = TIMESTAMP), df.final, by = "TIMESTAMP", all = TRUE)
     
     if (length(df.final$TIMESTAMP) != length(TIMESTAMP)) {
       dlg_message("Verificar la secuencia de datos, no coincide")
@@ -276,6 +286,7 @@ data_preprocess = function(df){
     }
     # -------------------------------------------------------------------------
   }
+  
   return(df.final)
 }
 
@@ -298,6 +309,8 @@ limites.duros = function(df) {
   # Limites inferiores 
   if (length(ind.Li) > 0) {
     dlg_message("Se encontraron valores por debajo del límite inferior, se procederá a eliminarloss.")
+    Limites.inferiores = df[ind.Li,]
+    Limites.inferiores <<- Limites.inferiores
     df[ind.Li, variable] = NA
     # Lógica para tratar los datos
   } else {
@@ -705,16 +718,340 @@ agrupamiento.diario = function(df) {
   return(df)
 }
 
+# Ver si los 0 son sequías o no
+QC19 = function(datos_diarios, df.coord){
+  # Parámetros modificables 
+  umbral.sequia = 1  # mm
+  distancia.vecino = 20 # km
+  umbra.corVecino = 0.5
+  umbral_seco = 0
+  
+  # No modificar desde aquí hacia abajo ----------------------------------------
+  
+  df.diario = datos_diarios
+  df.diario$TIMESTAMP = as.Date(df.diario$TIMESTAMP, format = "%Y-%m-%d")
+  df.diario = df.diario %>% 
+    arrange(TIMESTAMP)
+  
+  df.diario$Vent_movil = rollapply(df.diario[[variable]], width = 15, FUN = sum, fill = NA, align = "right")
+  
+  sequias.sospechosas = which(df.diario$Vent_movil == umbral_seco)
+  
+  if (length(sequias.sospechosas) > 0) {
+    dlg_message("Se encontraron sequías sospechosas. Se procederá a verificar si son sequías reales.")
+    
+    # Funciones para el cálculo del indice DDC ---------------------------------
+    df.ddc = df.diario %>% 
+      select(all_of(c("TIMESTAMP", variable))) # cambio de sintaxis en actualización de dplyr
+    
+    # dur_max_anualRS = Duración máxima anual de la racha seca, calculada como el número máximo de días consecutivos con  menos de 1 mm de precipitación
+    dur_max_anualRS = function(df_ddcs) {
+      
+      datos = df_ddcs
+      # Asegurémonos de que los datos estén ordenados por fecha
+      datos = datos %>% arrange(TIMESTAMP)
+      
+      # Identificar días secos (precipitación < 1 mm)
+      datos$dia_seco = ifelse(datos$Lluvia_Tot < 1, 1, 0)
+      
+      # Calcular la duración de las rachas secas
+      datos$racha_seca = with(rle(datos$dia_seco), rep(ifelse(values == 1, lengths, 0), lengths))
+      
+      # Agrupar por año y calcular la duración máxima de la racha seca
+      resultado = datos %>%
+        mutate(anio = year(TIMESTAMP)) %>%
+        group_by(anio) %>%
+        summarise(DDC = max(racha_seca, na.rm = TRUE))
+      return(resultado)
+    }
+    
+    max_duracionSeqP = dur_max_anualRS(df.ddc)
+    
+    banderas_DDC = function(valor, typ_C, max_duracion) {
+      maximo_historico = max(max_duracion$DDC, na.rm = TRUE)
+      # Añadimos el control de calidad
+      exceso_porcentaje = (valor - maximo_historico) / maximo_historico * 100
+      
+      if (typ_C == "p") {
+        indicador = case_when(
+          exceso_porcentaje >= 50 ~ 4,
+          exceso_porcentaje >= 33 ~ 3,
+          exceso_porcentaje >= 20 ~ 2,
+          exceso_porcentaje > 0 ~ 1,
+          TRUE ~ 0)
+      } else {
+        indicador = case_when(
+          exceso_porcentaje >= 50 ~ 8,
+          exceso_porcentaje >= 33 ~ 7,
+          exceso_porcentaje >= 20 ~ 6,
+          exceso_porcentaje > 0 ~ 5,
+          TRUE ~ 0)
+      }
+      return(indicador)
+    }
+    
+    # max_duracion = max_duracionSeqP
+    
+    # identifico RACHAS SECAS 
+    sequia.consecutiva = function(datos, DDC_propia, typ_C) {
+      # Consideramos como día seco si la lluvia es menor a 1
+      datos$dia_seco = ifelse(datos$Lluvia_Tot < 1, 1, 0)
+      datos$racha_seca = with(rle(datos$dia_seco), rep(ifelse(values == 1, lengths, 0), lengths))
+      datos$bandera_Q12 = NA
+      
+      indices.racha = which(datos$racha_seca > 0)
+      
+      diff_indices = c(1, diff(indices.racha))
+
+      filtered_indices = indices.racha[diff_indices != 1]
+      
+      for (i in 1:length(filtered_indices)) {
+        fecha.inicio = datos$TIMESTAMP[filtered_indices[i]]
+        fecha.fin = datos$TIMESTAMP[filtered_indices[i] + datos$racha_seca[filtered_indices[i]] - 1]
+        
+        # numero de días que paso entre fecha.inicio y fecha.fin
+        dias = as.matrix(seq(fecha.inicio, fecha.fin, by = "day"))
+        dias = length(dias)
+        indicador = banderas_DDC(dias, typ_C, DDC_propia)
+        datos$bandera_Q12[datos$TIMESTAMP == fecha.fin] = indicador
+        #datos$Q12[indices.racha[i]:indices.racha[i] + datos$racha_seca[indices.racha[i]] - 1] = indicador
+      }
+      datos = datos %>% select(all_of(c("TIMESTAMP", variable, "bandera_Q12")))
+      return(datos)
+    }
+    
+    Q12_prop = sequia.consecutiva(df.ddc, max_duracionSeqP, "p") # Propia
+    Q12_prop = Q12_prop %>% select(all_of(c("TIMESTAMP", "bandera_Q12")))
+    names(Q12_prop)[2] = paste("Q12_", nombre.estat, sep = "")
+    # -------------------------------------------------------------------------
+    
+    name = paste0(df.coord, ".csv")
+    coordenadas = fread(file.path(directory, name))
+    est.referencia = coordenadas[Estacion == nombre.estat,]
+    
+    # correlación espacial
+    # coor_espacial = na.omit(coordenadas)
+    # coordinates(coor_espacial) <- c("X", "Y")
+    # 
+    # find_max_distance <- function(coords) {
+    #   distances <- as.matrix(dist(coordinates(coords)))
+    #   max(apply(distances, 1, function(x) min(x[x > 0])))
+    # }
+    # max_dist <- find_max_distance(coor_espacial)
+    # 
+    # nb = dnearneigh(coor_espacial, 0,max_dist)
+    # listw = nb2listw(nb, style="W")
+    # 
+    # # Calcular el índice de Moran para la variable Z
+    # moran_z <- moran.test(coor_espacial$Z, listw)
+    # moran_plot <- moran.plot(coor_espacial$Z, listw)
+    
+    # Calculo la distancia entre las estaciones y la de referencia
+    coordenadas[, Distancia := sqrt((X - est.referencia$X)^2 + (Y - est.referencia$Y)^2)]
+    coordenadas[, Distancia_km := Distancia / 1000]
+    
+    # Excluir la estación de referencia de la lista de estaciones
+    coordenadas = coordenadas[Estacion != nombre.estat]
+    
+    
+    # Selecciono las que tienen un radio de menos de 20 km 
+    estaciones_cercanas = coordenadas[Distancia_km < 20]
+    estaciones_cercanas = estaciones_cercanas[order(Distancia_km)]
+    View(estaciones_cercanas)
+    dlg_message(paste0("Se encontro un total de ", nrow(estaciones_cercanas), " estaciones cercanas que cumplen el criterio."))
+    n_est = dlg_input("Ingrese el número de estaciones que desea incluir en el análisis (Mínimo 3 estaciones)", type = "numeric")$res
+    n_est = as.numeric(n_est)
+    
+    k = 1
+    directorios = list()
+    while(k <= n_est) {
+      dlg_message(paste0("Seleccione la estación ", k, " Sugerencia: ", estaciones_cercanas$Estacion[k]))
+      directorio = dlg_open()$res
+      directorios[[k]] = directorio
+      k = k + 1
+    }
+    
+    # Cargar los datos de las estaciones cercanas
+    correlaciones = data.frame(
+      Est.cercana = character(),
+      Correlacion = numeric(),
+      row.names = NULL
+    )
+    
+    df.base = df.diario
+    df.base = df.base[, c("TIMESTAMP", variable)]
+    
+    # Analizo las correlaciones 
+    for (i in 1:n_est) {
+      dir.est = directorios[[i]]
+      var_name = paste("est.near", i, sep = "_")
+      # Asignar el valor a la variable dinámica
+      data = fread(dir.est)
+      data$TIMESTAMP = as.Date(data$TIMESTAMP, format = "%Y-%m-%d")
+      data$Lluvia_Tot = as.numeric(data$Lluvia_Tot)
+      
+      name.estacion = basename(dir.est)
+      name.estacion = gsub(".csv", "", name.estacion)
+      
+      df.merge = merge(df.base, data, by = "TIMESTAMP", all = TRUE)
+      names(df.merge) = c("TIMESTAMP", "Est.objetivo", name.estacion)
+      
+      if (nrow(df.merge) > 0) {
+        correlacion = cor(df.merge$Est.objetivo, df.merge[[name.estacion]], use = "complete.obs")
+        correlaciones <- rbind(correlaciones, data.frame(
+          Est.cercana = name.estacion,
+          Correlacion = correlacion,
+          stringsAsFactors = FALSE  # Asegúrate de que no convierta los caracteres en factores
+        ))
+        
+      } else {
+        correlacion = NA
+        correlaciones <- rbind(correlaciones, data.frame(
+          Est.cercana = name.estacion,
+          Correlacion = correlacion,
+          stringsAsFactors = FALSE  # Asegúrate de que no convierta los caracteres en factores
+        ))
+      }
+      assign(var_name, data)
+    }
+    correlaciones_estaciones <<- correlaciones
+    if (any(correlaciones$Correlacion < umbra.corVecino)) {
+      View(correlaciones)
+      ind.no_correlacion = which(correlaciones$Correlacion < umbra.corVecino)
+      estaciones_no_cumplen <- paste(correlaciones[ind.no_correlacion, ]$Est.cercana, collapse = ", ")
+      dlg_message(paste("Las estaciones de: ", estaciones_no_cumplen,  "no cumplen con el umbral de correlación establecido. Desea conservalas para el análisis?"), type = c("yesno"))$res
+      if (msn == "no") {
+        correlaciones = correlaciones[-ind.no_correlacion,]
+        if (nrow(correlaciones) < 3) {
+          dlg_message("!!!!ADVERTENCIA !!!.... El número de estaciones cercanas es menor a 3, se recomienda seleccionar al menos 3 estaciones cercanas. El análisis podria no ser tan preciso")
+        }
+      }
+    }
+    
+    names.estar_analisis = correlaciones$Est.cercana
+    sequias.sospechosas = which(df.diario$Vent_movil == umbral_seco)
+    
+    df.diario$bandera = NA
+    df.diario$robustez = NA
+    
+    for (i in 1:length(sequias.sospechosas)) {
+      fecha.inicio = df.diario$TIMESTAMP[sequias.sospechosas[i] - 14]
+      fecha.fin = df.diario$TIMESTAMP[sequias.sospechosas[i]]
+      humedos = c()
+      for (j in 1:n_est) {
+        dir.est = directorios[[j]]
+        name.estacion = basename(dir.est)
+        name.estacion = gsub(".csv", "", name.estacion)
+        if (name.estacion %in% names.estar_analisis) {
+          var_name = paste("est.near", j, sep = "_")
+          # Asignar el valor a la variable dinámica
+          data = fread(dir.est)
+          data$TIMESTAMP = as.Date(data$TIMESTAMP, format = "%Y-%m-%d")
+          data$Lluvia_Tot = as.numeric(data$Lluvia_Tot)
+          
+          if (fecha.inicio %in% data$TIMESTAMP & fecha.fin %in% data$TIMESTAMP) {
+            humedos_near = data %>% 
+              filter(TIMESTAMP >= fecha.inicio & TIMESTAMP <= fecha.fin) %>%
+              summarize(count = if_else(n() > 0, sum(Lluvia_Tot > 0), NA_integer_)) %>%
+              pull(count)
+            humedos = c(humedos, humedos_near)
+          } else {
+            humedos_near = NA
+            humedos = c(humedos, humedos_near)
+          }
+        
+        }
+      }
+      
+      na_count =  sum(!is.na(humedos))
+      na_robustez = sum(is.na(humedos))
+      
+      if (na_count != 1) {
+        prom_hum = mean(humedos, na.rm = TRUE)
+        prom_hum = round(prom_hum, 0)
+        bandera = ifelse(prom_hum == 1, 1, 
+                         ifelse(prom_hum == 2 , 2,
+                                ifelse(prom_hum >= 3, 3, "NA")))
+      } else {
+        bandera = "Missing data"
+      }
+      
+      # Función para generar la etiqueta de Robustez
+      generate_robustez = function(na_robustez, max_na) {
+        paste0(max_na - na_robustez, " estat")
+      }
+      
+      Robustez = generate_robustez(na_robustez, length(correlaciones$Est.cercana))
+      
+      df.diario$bandera[sequias.sospechosas[i]] = bandera
+      df.diario$robustez[sequias.sospechosas[i]] = Robustez
+    }
+    
+    # Análisis de las sequías sospechosas en base a QC12
+    df.final = df.diario 
+    df.final = merge(df.final, Q12_prop, by = "TIMESTAMP", all = TRUE)
+    
+    df_analisis = df.diario %>%
+      select(all_of(c("TIMESTAMP", variable)))
+    
+    for (i in 1:n_est) {
+      dir.est = directorios[[i]]
+      name.estacion = basename(dir.est)
+      name.estacion = gsub(".csv", "", name.estacion)
+      if (name.estacion %in% names.estar_analisis) {
+        var_name = paste("est.near", j, sep = "_")
+        # Asignar el valor a la variable dinámica
+        data = fread(dir.est)
+        data$TIMESTAMP = as.Date(data$TIMESTAMP, format = "%Y-%m-%d")
+        data$Lluvia_Tot = as.numeric(data$Lluvia_Tot)
+        max_duracion = dur_max_anualRS(data)
+        Q12_vec = sequia.consecutiva(df_analisis, max_duracion, "v") # Propia
+        Q12_vec = Q12_vec %>% select(all_of(c("TIMESTAMP", "bandera_Q12")))
+        names(Q12_vec)[2] = paste("Q12_", name.estacion, sep = "")
+        df.final = merge(df.final, Q12_vec, by = "TIMESTAMP", all = TRUE)
+        
+      }
+    }
+    df.final_analisis = df.final[!is.na(df.final$bandera),]
+
+    } else {
+        dlg_message("No se encontraron sequías sospechosas.")
+      }
+  return(df.final_analisis)
+}
+corregir.fallos = function(variable, Q19) {
+  # Corregir los valores faltantes
+  dlg_message(paste("Se procedera a colcoar NA en los valores corroborados como fallos, por favor seleccione la estación ", nombre.estat, "a escala horaria"))
+  est.1 = dlg_open()$res
+  est.1 = fread(est.1)
+  Q19 = Q19 %>% 
+    filter(bandera == 3)
+  for (i in 1:nrow(Q19)) {
+    fecha.inicio = Q19$TIMESTAMP[i]
+    fecha.fin = Q19$TIMESTAMP[i]
+    inicio = as.POSIXct(paste0(fecha.inicio, " 00:00:00"), tz = "UTC")
+    fin = as.POSIXct(paste0(fecha.fin, " 23:50:00"), tz = "UTC")
+    est.1$Lluvia_Tot[est.1$TIMESTAMP >= inicio & est.1$TIMESTAMP <= fin] = NA
+  }
+  guardar = save.data(est.1, nombre.estat, "Datos_horarios_corregidos", "Datos_SinSequias")
+  
+  # Graficar la serie temporal
+  carpeta_1 = "Graph_Agrupamiento_horario"
+  carpeta_2 = "Estaciones_hora_SinSequias"
+  graficos = graficar(est.1, variable, nombre.estat, carpeta_1, carpeta_2)
+  return(est.1)
+}
+
 # ------------------------------------------------------------------------------
 
-################################################################################
+###################################################################################
 # ------------------------ Ejecución de la función -----------------------------
 # Campos necesarios para la ejecución de la función
 variable = "Lluvia_Tot" # Variable a analizar
-nombre.estat = "MamamagM_min5" # Nombre de la estación
+nombre.estat = "totoracochaP_db" # Nombre de la estación
 #--------------------- Ejecución del pre procesamiento --------------------------
 df = leer.datos() # Leer datos
-df = data_preprocess(df) # Pre procesamiento
+df = data_preprocess(df,variable) # Pre procesamiento
 df = limites.duros(df) # Límites duros
 
 summary(df)
@@ -724,4 +1061,11 @@ vacios
 fallas_sequias = posibles.fallas(df) # Posibles fallas
 datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
 datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
+################################################################################
+datos.diarios = leer.datos() # Leer datos
+analisis = QC19(datos.diarios, "coordenadas") # Análisis de sequías
+corregir = corregir.fallos(variable, analisis) # Corregir fallos
+summary(corregir)
+vacios = sum(is.na(corregir$Lluvia_Tot)) / nrow(corregir) * 100
+vacios
 ################################################################################
