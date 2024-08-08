@@ -1,6 +1,6 @@
 ################################################################################
 # Readme:
-# Versión: 2.15.8 (Beta)
+# Versión: 2.15.9 (Beta)
 # Librerías necesarias ---------------------------------------------------------
 library(pacman)
 p_load(data.table, dplyr, foreach, doParallel, svDialogs, lubridate, ggplot2, 
@@ -919,7 +919,7 @@ QC19 = function(datos_diarios, df.coord){
       View(correlaciones)
       ind.no_correlacion = which(correlaciones$Correlacion < umbra.corVecino)
       estaciones_no_cumplen <- paste(correlaciones[ind.no_correlacion, ]$Est.cercana, collapse = ", ")
-      dlg_message(paste("Las estaciones de: ", estaciones_no_cumplen,  "no cumplen con el umbral de correlación establecido. Desea conservalas para el análisis?"), type = c("yesno"))$res
+      msn = dlg_message(paste("Las estaciones de: ", estaciones_no_cumplen,  "no cumplen con el umbral de correlación establecido. Desea conservalas para el análisis?"), type = c("yesno"))$res
       if (msn == "no") {
         correlaciones = correlaciones[-ind.no_correlacion,]
         if (nrow(correlaciones) < 3) {
@@ -1039,6 +1039,9 @@ corregir.fallos = function(variable, Q19) {
   carpeta_1 = "Graph_Agrupamiento_horario"
   carpeta_2 = "Estaciones_hora_SinSequias"
   graficos = graficar(est.1, variable, nombre.estat, carpeta_1, carpeta_2)
+  
+  est.2 = agrupamiento.diario(est.1)
+  guardar.diario = save.data(est.2, nombre.estat, "Datos_diarios_corregidos", "Datos_SinSequias")
   return(est.1)
 }
 
@@ -1048,20 +1051,21 @@ corregir.fallos = function(variable, Q19) {
 # ------------------------ Ejecución de la función -----------------------------
 # Campos necesarios para la ejecución de la función
 variable = "Lluvia_Tot" # Variable a analizar
-nombre.estat = "totoracochaP_db" # Nombre de la estación
+nombre.estat = "llaviucuM_db" # Nombre de la estación
 #--------------------- Ejecución del pre procesamiento --------------------------
-df = leer.datos() # Leer datos
-df = data_preprocess(df,variable) # Pre procesamiento
-df = limites.duros(df) # Límites duros
-
-summary(df)
-vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
-vacios
-
-fallas_sequias = posibles.fallas(df) # Posibles fallas
-datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
-datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
+# df = leer.datos() # Leer datos
+# df = data_preprocess(df,variable) # Pre procesamiento
+# df = limites.duros(df) # Límites duros
+# 
+# summary(df)
+# vacios = sum(is.na(df$Lluvia_Tot)) / nrow(df) * 100
+# vacios
+# 
+# fallas_sequias = posibles.fallas(df) # Posibles fallas
+# datos.horarios = agrupamiento.horario(fallas_sequias$df) # Agrupamiento horario
+# datos.diarios = agrupamiento.diario(datos.horarios) # Agrupamiento diario
 ################################################################################
+# Verificar y tratar sequias. 
 datos.diarios = leer.datos() # Leer datos
 analisis = QC19(datos.diarios, "coordenadas") # Análisis de sequías
 corregir = corregir.fallos(variable, analisis) # Corregir fallos
